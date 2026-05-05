@@ -1,7 +1,7 @@
 import * as THREE from "three";
 import JSZip from "jszip";
 import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
-import { MMDLoader } from "three/addons/loaders/MMDLoader.js";
+import { MMDLoader } from "three-stdlib/loaders/MMDLoader.js";
 import { PointerLockControls } from "three/addons/controls/PointerLockControls.js";
 import { VRButton } from "three/addons/webxr/VRButton.js";
 import { VRMLoaderPlugin, VRMUtils } from "@pixiv/three-vrm";
@@ -422,7 +422,7 @@ function loadModelFile(file) {
   currentObjectUrl = URL.createObjectURL(file);
 
   if (isPmxFile(file.name)) {
-    loadPmx(currentObjectUrl, file.name);
+    loadPmx(currentObjectUrl, file.name, { modelExtension: "pmx" });
     return;
   }
 
@@ -746,7 +746,9 @@ async function loadPmx(url, label, options = {}) {
 
   try {
     const loaderToUse = options.loader ?? mmdLoader;
-    const mesh = await loaderToUse.loadAsync(url);
+    const mesh = options.modelExtension
+      ? await loadMmdModelWithExtension(loaderToUse, url, options.modelExtension, options.resourcePath)
+      : await loaderToUse.loadAsync(url);
 
     mesh.name = "LoadedPMX";
     mesh.position.set(loadedModels.length * MODEL_X_OFFSET_METERS, 0, 0);
@@ -813,6 +815,8 @@ async function loadPmxZip(file) {
 
     await loadPmx(pmxUrl, `${file.name} / ${getZipBaseName(pmxEntry.name)}`, {
       loader: zipMmdLoader,
+      modelExtension: "pmx",
+      resourcePath: "/",
       resourceUrls: zipResources.urls,
     });
   } catch (error) {
@@ -824,6 +828,27 @@ async function loadPmxZip(file) {
     }
     setStatus(`Could not load PMX zip: ${error.message}`);
   }
+}
+
+function loadMmdModelWithExtension(loaderToUse, url, extension, resourcePath) {
+  return new Promise((resolve, reject) => {
+    const normalizedExtension = extension.toLowerCase();
+    const loadMethod = normalizedExtension === "pmd" ? "loadPMD" : "loadPMX";
+    const builder = loaderToUse.meshBuilder.setCrossOrigin(loaderToUse.crossOrigin);
+
+    loaderToUse[loadMethod](
+      url,
+      (data) => {
+        try {
+          resolve(builder.build(data, resourcePath ?? loaderToUse.resourcePath ?? "", undefined, reject));
+        } catch (error) {
+          reject(error);
+        }
+      },
+      undefined,
+      reject,
+    );
+  });
 }
 
 async function createZipResourceUrls(entries) {
