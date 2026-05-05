@@ -18,6 +18,7 @@ const VR_UI_RAY_LENGTH = 4;
 const VR_UI_TEXTURE_PIXELS_PER_METER = 1400;
 const VR_UI_TOGGLE_BUTTON_INDEX = 4;
 const MODEL_X_OFFSET_METERS = 1;
+const VR_UI_PANEL_WIDTH = 0.46;
 
 const statusEl = document.querySelector("#status");
 const fileInput = document.querySelector("#fileInput");
@@ -133,23 +134,23 @@ function setupWorld() {
 function setupVRUI() {
   const panel = new THREE.Group();
   panel.name = "VRUIPanel";
-  panel.position.set(0, -0.28, -VR_UI_PANEL_DISTANCE);
+  panel.position.set(-0.36, -0.24, -VR_UI_PANEL_DISTANCE);
 
-  const background = createVRUIPlane(0.92, 0.82, "#20242d");
+  const background = createVRUIPlane(VR_UI_PANEL_WIDTH, 0.82, "#20242d");
   background.material.opacity = 0.88;
   background.position.z = -0.01;
   panel.add(background);
 
-  const title = createVRUILabel("XR Model Viewer", 0.78, 0.08, {
-    fontSize: 34,
+  const title = createVRUILabel("XR Viewer", 0.39, 0.08, {
+    fontSize: 30,
     background: "#2b3340",
     color: "#f5f7fb",
   });
   title.position.set(0, 0.33, 0);
   panel.add(title);
 
-  const stateLabel = createVRUILabel("Model: none / Motion: none", 0.78, 0.07, {
-    fontSize: 24,
+  const stateLabel = createVRUILabel("M: none | A: none", 0.39, 0.07, {
+    fontSize: 18,
     background: "#111827",
     color: "#d9e0ee",
   });
@@ -158,13 +159,13 @@ function setupVRUI() {
   panel.add(stateLabel);
 
   const buttons = [
-    ["Next Model", selectNextModel],
-    ["Next Motion", selectNextMotion],
-    ["Play Motion", playAnimation],
-    ["Stop Motion", stopAnimation],
+    ["Next Mdl", selectNextModel],
+    ["Next Anim", selectNextMotion],
+    ["Play", playAnimation],
+    ["Stop", stopAnimation],
     ["Show / Hide", toggleActiveModelVisibility],
     ["Reset Pos", resetActiveModelPosition],
-    ["Hide Panel", toggleVRUIPanel],
+    ["Exit VR", exitVRSession],
   ];
 
   buttons.forEach(([label, onSelect], index) => {
@@ -174,22 +175,10 @@ function setupVRUI() {
     uiIntersectTargets.push(button);
   });
 
-  const toggle = createVRUIButton("UI", toggleVRUIPanel, {
-    width: 0.22,
-    height: 0.1,
-    fontSize: 34,
-  });
-  toggle.name = "VRUIToggle";
-  toggle.position.set(0.43, -0.28, -VR_UI_PANEL_DISTANCE);
-  toggle.visible = false;
-  uiIntersectTargets.push(toggle);
-
   camera.add(panel);
-  camera.add(toggle);
 
   vrUi = {
     panel,
-    toggle,
     stateLabel,
     visible: true,
   };
@@ -198,7 +187,7 @@ function setupVRUI() {
 }
 
 function createVRUIButton(label, onSelect, options = {}) {
-  const button = createVRUILabel(label, options.width ?? 0.72, options.height ?? 0.09, {
+  const button = createVRUILabel(label, options.width ?? 0.36, options.height ?? 0.09, {
     fontSize: options.fontSize ?? 28,
     background: options.background ?? "#7dd3fc",
     color: options.color ?? "#09111a",
@@ -427,7 +416,11 @@ function updateVRUIStateLabel() {
   const modelName = currentModel?.name ?? "none";
   const motionName = currentModel?.currentMotion?.name ?? "none";
   const x = currentModel ? currentModel.object.position.x.toFixed(1) : "-";
-  drawVRUILabel(vrUi.stateLabel, `Model: ${modelName} / Motion: ${motionName} / X:${x}`);
+  drawVRUILabel(vrUi.stateLabel, `M:${shortLabel(modelName)} | A:${shortLabel(motionName)} | X:${x}`);
+}
+
+function shortLabel(label) {
+  return label.length > 10 ? `${label.slice(0, 9)}...` : label;
 }
 
 function renderModelList() {
@@ -622,8 +615,18 @@ function toggleVRUIPanel() {
 
   vrUi.visible = !vrUi.visible;
   vrUi.panel.visible = vrUi.visible;
-  vrUi.toggle.visible = !vrUi.visible;
   setStatus(vrUi.visible ? "VR UI panel shown." : "VR UI panel hidden.");
+}
+
+function exitVRSession() {
+  const session = renderer.xr.getSession();
+
+  if (!session) {
+    setStatus("Not currently in VR.");
+    return;
+  }
+
+  session.end();
 }
 
 function updateVRUIHover() {
