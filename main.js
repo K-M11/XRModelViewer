@@ -26,6 +26,8 @@ const loadUrlButton = document.querySelector("#loadUrlButton");
 const lockPointerButton = document.querySelector("#lockPointerButton");
 const playAnimationButton = document.querySelector("#playAnimationButton");
 const stopAnimationButton = document.querySelector("#stopAnimationButton");
+const modelListEl = document.querySelector("#modelList");
+const motionListEl = document.querySelector("#motionList");
 
 const clock = new THREE.Clock();
 const moveState = {
@@ -60,8 +62,6 @@ let currentVrm = null;
 let currentModel = null;
 let currentObjectUrl = null;
 let currentVrmaObjectUrl = null;
-let animationMixer = null;
-let animationAction = null;
 let activeModelIndex = -1;
 let activeMotionIndex = -1;
 let lastXRAxesLogTime = 0;
@@ -105,6 +105,7 @@ setupWorld();
 setupVRUI();
 setupXRControllers();
 setupEvents();
+renderAssetLists();
 renderer.setAnimationLoop(render);
 
 function setupWorld() {
@@ -380,6 +381,66 @@ function loadMotionFile(file) {
   loadVrma(currentVrmaObjectUrl, file.name);
 }
 
+function renderAssetLists() {
+  renderModelList();
+  renderMotionList();
+}
+
+function renderModelList() {
+  modelListEl.textContent = "";
+
+  if (loadedModels.length === 0) {
+    modelListEl.append(createAssetListEmpty("No models"));
+    return;
+  }
+
+  loadedModels.forEach((model, index) => {
+    const item = createAssetListButton({
+      label: `${index + 1}. ${model.name}`,
+      detail: model.currentMotion?.name ?? "No motion",
+      active: index === activeModelIndex,
+      onClick: () => setActiveModel(index),
+    });
+    modelListEl.append(item);
+  });
+}
+
+function renderMotionList() {
+  motionListEl.textContent = "";
+
+  if (loadedMotions.length === 0) {
+    motionListEl.append(createAssetListEmpty("No motions"));
+    return;
+  }
+
+  loadedMotions.forEach((motion, index) => {
+    const item = createAssetListButton({
+      label: `${index + 1}. ${motion.name}`,
+      detail: motion.type.toUpperCase(),
+      active: index === activeMotionIndex,
+      onClick: () => setActiveMotion(index),
+    });
+    motionListEl.append(item);
+  });
+}
+
+function createAssetListButton({ label, detail, active, onClick }) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = `asset-item${active ? " active" : ""}`;
+  button.title = `${label} - ${detail}`;
+  button.textContent = `${label} / ${detail}`;
+  button.addEventListener("click", onClick);
+  return button;
+}
+
+function createAssetListEmpty(label) {
+  const item = document.createElement("p");
+  item.className = "hint";
+  item.textContent = label;
+  return item;
+}
+
 function selectNextModel() {
   if (loadedModels.length === 0) {
     setStatus("No models loaded. Load VRM before entering VR.");
@@ -406,6 +467,7 @@ function toggleActiveModelVisibility() {
 
   currentModel.visible = !currentModel.visible;
   currentModel.object.visible = currentModel.visible;
+  renderAssetLists();
   setStatus(`${currentModel.name} ${currentModel.visible ? "shown" : "hidden"}.`);
 }
 
@@ -524,6 +586,7 @@ async function loadVrm(url, label) {
     if (activeMotionIndex !== -1) {
       setActiveMotion(activeMotionIndex);
     }
+    renderAssetLists();
 
     setStatus(`Loaded ${label}. Enter VR with the VR button when using HTTPS.`);
 
@@ -542,6 +605,8 @@ function createModelRecord({ type, name, object, runtime }) {
     vrm: type === "vrm" ? runtime : null,
     pmx: type === "pmx" ? runtime : null,
     currentMotion: null,
+    animationMixer: null,
+    animationAction: null,
     visible: true,
   };
 }
@@ -549,7 +614,6 @@ function createModelRecord({ type, name, object, runtime }) {
 function setActiveModel(index) {
   if (index < 0 || index >= loadedModels.length) return;
 
-  clearAnimation();
   activeModelIndex = index;
   currentModel = loadedModels[activeModelIndex];
   currentVrm = currentModel.vrm;
@@ -562,13 +626,12 @@ function setActiveModel(index) {
     frameModel(currentModel.object);
   }
 
-  applyCurrentAnimation();
-
-  if (animationAction) {
-    playAnimation();
-  } else {
-    setStatus(`Active model: ${currentModel.name}`);
+  if (currentModel.currentMotion && !currentModel.animationAction) {
+    applyMotionToModel(currentModel, currentModel.currentMotion);
   }
+
+  renderAssetLists();
+  setStatus(`Active model: ${currentModel.name}`);
 }
 
 async function loadVrma(url, label) {
@@ -589,6 +652,7 @@ async function loadVrma(url, label) {
     });
     loadedMotions.push(motion);
     setActiveMotion(loadedMotions.length - 1);
+    renderAssetLists();
 
     if (!currentVrm) {
       setStatus(`Loaded motion ${label}. Select a VRM model to apply it.`);
@@ -619,75 +683,71 @@ function setActiveMotion(index) {
 
   if (currentModel?.type === "vrm") {
     currentModel.currentMotion = motion;
+    applyMotionToModel(currentModel, motion);
   }
 
-  applyCurrentAnimation();
+  renderAssetLists();
 
-  if (animationAction) {
+  if (currentModel?.animationAction) {
     playAnimation();
   } else {
     setStatus(`Active motion: ${motion.name}`);
   }
 }
 
-function applyCurrentAnimation() {
-  clearAnimation();
+function applyMotionToModel(model, motion) {
+  clearModelAnimation(model);
 
-  const motion = currentModel?.currentMotion;
+  if (!model?.vrm || !motion) return;
 
-  if (!currentVrm || !motion) return;
-
-  if (currentModel) {
-    currentModel.currentMotion = motion;
+  model.currentMotion = motion;
+  model.vrm.humanoid?.resetNormalizedPose?.();
+  model.vrm.lookAt?.reset?.();
+  if (model.vrm.lookAt) {
+    model.vrm.lookAt.autoUpdate = motion.runtime.lookAtTrack != null;
   }
 
-  currentVrm.humanoid?.resetNormalizedPose?.();
-  currentVrm.lookAt?.reset?.();
-  if (currentVrm.lookAt) {
-    currentVrm.lookAt.autoUpdate = motion.runtime.lookAtTrack != null;
-  }
-
-  const clip = createVRMAnimationClip(motion.runtime, currentVrm);
-  animationMixer = new THREE.AnimationMixer(currentVrm.scene);
-  animationAction = animationMixer.clipAction(clip);
-  animationAction.setLoop(THREE.LoopRepeat);
-  animationAction.clampWhenFinished = false;
+  const clip = createVRMAnimationClip(motion.runtime, model.vrm);
+  model.animationMixer = new THREE.AnimationMixer(model.object);
+  model.animationAction = model.animationMixer.clipAction(clip);
+  model.animationAction.setLoop(THREE.LoopRepeat);
+  model.animationAction.clampWhenFinished = false;
 }
 
 function playAnimation() {
-  if (!animationAction) {
-    setStatus("Load both a VRM model and a VRMA animation first.");
+  if (!currentModel?.animationAction) {
+    setStatus("Select a VRM model and apply a VRMA motion first.");
     return;
   }
 
-  animationAction.paused = false;
-  animationAction.play();
-  setStatus("Animation playing.");
+  currentModel.animationAction.paused = false;
+  currentModel.animationAction.play();
+  setStatus(`Animation playing: ${currentModel.name}.`);
 }
 
 function stopAnimation() {
-  if (!animationAction) {
-    setStatus("No animation is loaded.");
+  if (!currentModel?.animationAction) {
+    setStatus("No animation is loaded for the active model.");
     return;
   }
 
-  animationAction.stop();
-  currentVrm?.humanoid?.resetNormalizedPose?.();
-  currentVrm?.expressionManager?.resetValues?.();
-  setStatus("Animation stopped.");
+  currentModel.animationAction.stop();
+  currentModel.vrm?.humanoid?.resetNormalizedPose?.();
+  currentModel.vrm?.expressionManager?.resetValues?.();
+  setStatus(`Animation stopped: ${currentModel.name}.`);
 }
 
-function clearAnimation() {
-  if (!animationMixer) return;
+function clearModelAnimation(model) {
+  if (!model?.animationMixer) return;
 
-  animationMixer.stopAllAction();
+  model.animationMixer.stopAllAction();
 
-  if (currentVrm) {
-    animationMixer.uncacheRoot(currentVrm.scene);
+  if (model.object) {
+    model.animationMixer.uncacheRoot(model.object);
   }
 
-  animationMixer = null;
-  animationAction = null;
+  model.animationMixer = null;
+  model.animationAction = null;
 }
 
 function setupLookAtProxy(vrm) {
@@ -935,11 +995,8 @@ function render() {
   updateMovement(delta);
   updateVRUIHover();
 
-  if (animationMixer) {
-    animationMixer.update(delta);
-  }
-
   for (const model of loadedModels) {
+    model.animationMixer?.update(delta);
     model.vrm?.update(delta);
   }
 
