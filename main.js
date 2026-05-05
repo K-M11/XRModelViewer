@@ -54,14 +54,16 @@ const uiRayDirection = new THREE.Vector3();
 const uiControllerMatrix = new THREE.Matrix4();
 const uiIntersectTargets = [];
 
-const models = [];
+const loadedModels = [];
+const loadedMotions = [];
 let currentVrm = null;
 let currentModel = null;
 let currentObjectUrl = null;
-let currentVrmAnimation = null;
 let currentVrmaObjectUrl = null;
 let animationMixer = null;
 let animationAction = null;
+let activeModelIndex = -1;
+let activeMotionIndex = -1;
 let lastXRAxesLogTime = 0;
 let vrUi = null;
 let wasVRUIToggleButtonPressed = false;
@@ -126,7 +128,7 @@ function setupVRUI() {
   panel.name = "VRUIPanel";
   panel.position.set(0, -0.28, -VR_UI_PANEL_DISTANCE);
 
-  const background = createVRUIPlane(0.92, 0.68, "#20242d");
+  const background = createVRUIPlane(0.92, 0.82, "#20242d");
   background.material.opacity = 0.88;
   background.position.z = -0.01;
   panel.add(background);
@@ -136,20 +138,22 @@ function setupVRUI() {
     background: "#2b3340",
     color: "#f5f7fb",
   });
-  title.position.set(0, 0.25, 0);
+  title.position.set(0, 0.33, 0);
   panel.add(title);
 
   const buttons = [
-    ["Load Model", requestModelFileLoad],
-    ["Load VRMA", requestMotionFileLoad],
+    ["Next Model", selectNextModel],
+    ["Next Motion", selectNextMotion],
     ["Play Motion", playAnimation],
     ["Stop Motion", stopAnimation],
+    ["Show / Hide", toggleActiveModelVisibility],
+    ["Reset Pos", resetActiveModelPosition],
     ["Hide Panel", toggleVRUIPanel],
   ];
 
   buttons.forEach(([label, onSelect], index) => {
     const button = createVRUIButton(label, onSelect);
-    button.position.set(0, 0.12 - index * 0.115, 0);
+    button.position.set(0, 0.13 - index * 0.09, 0);
     panel.add(button);
     uiIntersectTargets.push(button);
   });
@@ -358,26 +362,6 @@ function setupEvents() {
   });
 }
 
-function requestModelFileLoad() {
-  if (renderer.xr.isPresenting) {
-    setStatus("VR file picker is browser-limited. Exit VR or use the desktop panel to load a model.");
-    return;
-  }
-
-  fileInput.click();
-  setStatus("Choose a VRM model file.");
-}
-
-function requestMotionFileLoad() {
-  if (renderer.xr.isPresenting) {
-    setStatus("VR file picker is browser-limited. Exit VR or use the desktop panel to load VRMA.");
-    return;
-  }
-
-  vrmaInput.click();
-  setStatus("Choose a VRMA animation file.");
-}
-
 function loadModelFile(file) {
   if (currentObjectUrl) {
     URL.revokeObjectURL(currentObjectUrl);
@@ -394,6 +378,51 @@ function loadMotionFile(file) {
 
   currentVrmaObjectUrl = URL.createObjectURL(file);
   loadVrma(currentVrmaObjectUrl, file.name);
+}
+
+function selectNextModel() {
+  if (loadedModels.length === 0) {
+    setStatus("No models loaded. Load VRM before entering VR.");
+    return;
+  }
+
+  setActiveModel((activeModelIndex + 1) % loadedModels.length);
+}
+
+function selectNextMotion() {
+  if (loadedMotions.length === 0) {
+    setStatus("No motions loaded. Load VRMA before entering VR.");
+    return;
+  }
+
+  setActiveMotion((activeMotionIndex + 1) % loadedMotions.length);
+}
+
+function toggleActiveModelVisibility() {
+  if (!currentModel) {
+    setStatus("No active model.");
+    return;
+  }
+
+  currentModel.object.visible = !currentModel.object.visible;
+  setStatus(`${currentModel.name} ${currentModel.object.visible ? "shown" : "hidden"}.`);
+}
+
+function resetActiveModelPosition() {
+  if (!currentModel) {
+    setStatus("No active model.");
+    return;
+  }
+
+  currentModel.object.position.set(0, 0, 0);
+  currentModel.object.rotation.set(0, 0, 0);
+  currentModel.object.scale.setScalar(1);
+
+  if (!renderer.xr.isPresenting) {
+    frameModel(currentModel.object);
+  }
+
+  setStatus(`${currentModel.name} position reset.`);
 }
 
 function handleVRUISelect(controller) {
@@ -465,8 +494,6 @@ async function loadVrm(url, label) {
       throw new Error("The loaded file did not contain VRM data.");
     }
 
-    clearCurrentVrm();
-
     // VRM 0.x faces backward in three-vrm's normalized coordinate system.
     // VRM 1.0 should not be rotated here.
     VRMUtils.rotateVRM0(vrm);
@@ -483,21 +510,17 @@ async function loadVrm(url, label) {
 
     setupLookAtProxy(vrm);
 
-    scene.add(vrm.scene);
-    currentModel = createModelRecord({
+    const model = createModelRecord({
       type: "vrm",
       name: label,
       object: vrm.scene,
       runtime: vrm,
     });
-    models.push(currentModel);
-    currentVrm = currentModel.runtime;
 
-    frameModel(vrm.scene);
-    applyCurrentAnimation();
-    if (animationAction) {
-      playAnimation();
-    }
+    loadedModels.push(model);
+    scene.add(model.object);
+    setActiveModel(loadedModels.length - 1);
+
     setStatus(`Loaded ${label}. Enter VR with the VR button when using HTTPS.`);
 
   } catch (error) {
@@ -508,12 +531,34 @@ async function loadVrm(url, label) {
 
 function createModelRecord({ type, name, object, runtime }) {
   return {
-    id: globalThis.crypto?.randomUUID?.() ?? `${type}-${Date.now()}-${models.length}`,
+    id: globalThis.crypto?.randomUUID?.() ?? `${type}-${Date.now()}-${loadedModels.length}`,
     type,
     name,
     object,
     runtime,
   };
+}
+
+function setActiveModel(index) {
+  if (index < 0 || index >= loadedModels.length) return;
+
+  clearAnimation();
+  activeModelIndex = index;
+  currentModel = loadedModels[activeModelIndex];
+  currentVrm = currentModel.type === "vrm" ? currentModel.runtime : null;
+
+  loadedModels.forEach((model, modelIndex) => {
+    model.object.visible = modelIndex === activeModelIndex;
+  });
+
+  frameModel(currentModel.object);
+  applyCurrentAnimation();
+
+  if (animationAction) {
+    playAnimation();
+  } else {
+    setStatus(`Active model: ${currentModel.name}`);
+  }
 }
 
 async function loadVrma(url, label) {
@@ -527,15 +572,19 @@ async function loadVrma(url, label) {
       throw new Error("The loaded file did not contain VRMA animation data.");
     }
 
-    currentVrmAnimation = vrmAnimation;
+    const motion = createMotionRecord({
+      type: "vrma",
+      name: label,
+      runtime: vrmAnimation,
+    });
+    loadedMotions.push(motion);
+    setActiveMotion(loadedMotions.length - 1);
 
     if (!currentVrm) {
       setStatus(`Loaded animation ${label}. Load a VRM model to play it.`);
       return;
     }
 
-    applyCurrentAnimation();
-    playAnimation();
     setStatus(`Playing animation ${label}.`);
   } catch (error) {
     console.error(error);
@@ -543,18 +592,44 @@ async function loadVrma(url, label) {
   }
 }
 
+function createMotionRecord({ type, name, runtime }) {
+  return {
+    id: globalThis.crypto?.randomUUID?.() ?? `${type}-${Date.now()}-${loadedMotions.length}`,
+    type,
+    name,
+    runtime,
+  };
+}
+
+function setActiveMotion(index) {
+  if (index < 0 || index >= loadedMotions.length) return;
+
+  activeMotionIndex = index;
+  applyCurrentAnimation();
+
+  const motion = loadedMotions[activeMotionIndex];
+
+  if (animationAction) {
+    playAnimation();
+  } else {
+    setStatus(`Active motion: ${motion.name}`);
+  }
+}
+
 function applyCurrentAnimation() {
   clearAnimation();
 
-  if (!currentVrm || !currentVrmAnimation) return;
+  const motion = loadedMotions[activeMotionIndex];
+
+  if (!currentVrm || !motion) return;
 
   currentVrm.humanoid?.resetNormalizedPose?.();
   currentVrm.lookAt?.reset?.();
   if (currentVrm.lookAt) {
-    currentVrm.lookAt.autoUpdate = currentVrmAnimation.lookAtTrack != null;
+    currentVrm.lookAt.autoUpdate = motion.runtime.lookAtTrack != null;
   }
 
-  const clip = createVRMAnimationClip(currentVrmAnimation, currentVrm);
+  const clip = createVRMAnimationClip(motion.runtime, currentVrm);
   animationMixer = new THREE.AnimationMixer(currentVrm.scene);
   animationAction = animationMixer.clipAction(clip);
   animationAction.setLoop(THREE.LoopRepeat);
@@ -606,35 +681,6 @@ function setupLookAtProxy(vrm) {
   const lookAtProxy = new VRMLookAtQuaternionProxy(vrm.lookAt);
   lookAtProxy.name = proxyName;
   vrm.scene.add(lookAtProxy);
-}
-
-function clearCurrentVrm() {
-  if (!currentVrm) return;
-
-  clearAnimation();
-  scene.remove(currentVrm.scene);
-  currentVrm.scene.traverse((object) => {
-    if (!object.isMesh) return;
-
-    object.geometry?.dispose();
-    const materials = Array.isArray(object.material)
-      ? object.material
-      : [object.material];
-
-    for (const material of materials) {
-      disposeMaterial(material);
-    }
-  });
-
-  if (currentModel) {
-    const modelIndex = models.findIndex((model) => model.id === currentModel.id);
-    if (modelIndex !== -1) {
-      models.splice(modelIndex, 1);
-    }
-  }
-
-  currentVrm = null;
-  currentModel = null;
 }
 
 function disposeMaterial(material) {
