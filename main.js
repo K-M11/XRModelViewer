@@ -17,6 +17,7 @@ const VR_UI_PANEL_DISTANCE = 1.25;
 const VR_UI_RAY_LENGTH = 4;
 const VR_UI_TEXTURE_PIXELS_PER_METER = 1400;
 const VR_UI_TOGGLE_BUTTON_INDEX = 4;
+const MODEL_X_OFFSET_METERS = 1;
 
 const statusEl = document.querySelector("#status");
 const fileInput = document.querySelector("#fileInput");
@@ -142,6 +143,15 @@ function setupVRUI() {
   title.position.set(0, 0.33, 0);
   panel.add(title);
 
+  const stateLabel = createVRUILabel("Model: none / Motion: none", 0.78, 0.07, {
+    fontSize: 24,
+    background: "#111827",
+    color: "#d9e0ee",
+  });
+  stateLabel.name = "VRUIStateLabel";
+  stateLabel.position.set(0, 0.24, 0);
+  panel.add(stateLabel);
+
   const buttons = [
     ["Next Model", selectNextModel],
     ["Next Motion", selectNextMotion],
@@ -154,7 +164,7 @@ function setupVRUI() {
 
   buttons.forEach(([label, onSelect], index) => {
     const button = createVRUIButton(label, onSelect);
-    button.position.set(0, 0.13 - index * 0.09, 0);
+    button.position.set(0, 0.1 - index * 0.09, 0);
     panel.add(button);
     uiIntersectTargets.push(button);
   });
@@ -175,8 +185,11 @@ function setupVRUI() {
   vrUi = {
     panel,
     toggle,
+    stateLabel,
     visible: true,
   };
+
+  updateVRUIStateLabel();
 }
 
 function createVRUIButton(label, onSelect, options = {}) {
@@ -196,22 +209,6 @@ function createVRUILabel(label, width, height, options = {}) {
   canvas.width = Math.ceil(width * VR_UI_TEXTURE_PIXELS_PER_METER);
   canvas.height = Math.ceil(height * VR_UI_TEXTURE_PIXELS_PER_METER);
 
-  const context = canvas.getContext("2d");
-  const background = options.background ?? "#ffffff";
-  const color = options.color ?? "#000000";
-  const fontSize = Math.round(options.fontSize ?? canvas.height * 0.36);
-  const radius = Math.max(16, Math.round(canvas.height * 0.22));
-
-  context.fillStyle = background;
-  roundRect(context, 0, 0, canvas.width, canvas.height, radius);
-  context.fill();
-
-  context.fillStyle = color;
-  context.font = `700 ${fontSize}px system-ui, sans-serif`;
-  context.textAlign = "center";
-  context.textBaseline = "middle";
-  context.fillText(label, canvas.width / 2, canvas.height / 2);
-
   const texture = new THREE.CanvasTexture(canvas);
   texture.colorSpace = THREE.SRGBColorSpace;
   texture.anisotropy = renderer.capabilities.getMaxAnisotropy();
@@ -225,7 +222,35 @@ function createVRUILabel(label, width, height, options = {}) {
 
   const mesh = new THREE.Mesh(new THREE.PlaneGeometry(width, height), material);
   mesh.userData.label = label;
+  mesh.userData.canvas = canvas;
+  mesh.userData.texture = texture;
+  mesh.userData.labelOptions = options;
+  drawVRUILabel(mesh, label);
   return mesh;
+}
+
+function drawVRUILabel(mesh, label) {
+  const canvas = mesh.userData.canvas;
+  const context = canvas.getContext("2d");
+  const options = mesh.userData.labelOptions ?? {};
+  const background = options.background ?? "#ffffff";
+  const color = options.color ?? "#000000";
+  const fontSize = Math.round(options.fontSize ?? canvas.height * 0.36);
+  const radius = Math.max(16, Math.round(canvas.height * 0.22));
+
+  context.clearRect(0, 0, canvas.width, canvas.height);
+  context.fillStyle = background;
+  roundRect(context, 0, 0, canvas.width, canvas.height, radius);
+  context.fill();
+
+  context.fillStyle = color;
+  context.font = `700 ${fontSize}px system-ui, sans-serif`;
+  context.textAlign = "center";
+  context.textBaseline = "middle";
+  context.fillText(label, canvas.width / 2, canvas.height / 2);
+
+  mesh.userData.label = label;
+  mesh.userData.texture.needsUpdate = true;
 }
 
 function createVRUIPlane(width, height, color) {
@@ -384,6 +409,15 @@ function loadMotionFile(file) {
 function renderAssetLists() {
   renderModelList();
   renderMotionList();
+  updateVRUIStateLabel();
+}
+
+function updateVRUIStateLabel() {
+  if (!vrUi?.stateLabel) return;
+
+  const modelName = currentModel?.name ?? "none";
+  const motionName = currentModel?.currentMotion?.name ?? "none";
+  drawVRUILabel(vrUi.stateLabel, `Model: ${modelName} / Motion: ${motionName}`);
 }
 
 function renderModelList() {
@@ -478,6 +512,7 @@ function resetActiveModelPosition() {
   }
 
   currentModel.object.position.set(0, 0, 0);
+  currentModel.object.position.x = activeModelIndex * MODEL_X_OFFSET_METERS;
   currentModel.object.rotation.set(0, 0, 0);
   currentModel.object.scale.setScalar(1);
 
@@ -567,7 +602,7 @@ async function loadVrm(url, label) {
     VRMUtils.removeUnnecessaryJoints?.(vrm.scene);
 
     vrm.scene.name = "LoadedVRM";
-    vrm.scene.position.set(0, 0, 0);
+    vrm.scene.position.set(loadedModels.length * MODEL_X_OFFSET_METERS, 0, 0);
     vrm.scene.rotation.set(0, 0, 0);
     vrm.scene.scale.setScalar(1);
 
