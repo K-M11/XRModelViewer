@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>XR VRM Viewer</title>
+    <title>XR Model Viewer</title>
     <style>
       html,
       body {
@@ -163,12 +163,12 @@
     </script>
   </head>
   <body>
-    <main class="panel" aria-label="VRM viewer controls">
-      <h1>XR VRM Viewer</h1>
+    <main class="panel" aria-label="XR model viewer controls">
+      <h1>XR Model Viewer</h1>
 
       <label>
-        <span class="hint">Local VRM</span>
-        <input id="fileInput" type="file" accept=".vrm,model/gltf-binary" />
+        <span class="hint">Local Model</span>
+        <input id="fileInput" type="file" accept=".vrm,.pmx,model/gltf-binary" />
       </label>
 
       <label>
@@ -211,7 +211,7 @@
       </section>
 
       <p class="hint">Move with WASD or arrow keys. Press Esc to release mouse look.</p>
-      <p id="status" class="status">Choose a local VRM file or load one from a URL.</p>
+      <p id="status" class="status">Choose a local VRM/PMX file or load a VRM from a URL.</p>
     </main>
 
     <script type="module" src="./main.js"></script>
