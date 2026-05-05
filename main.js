@@ -21,6 +21,7 @@ const VR_UI_TEXTURE_PIXELS_PER_METER = 1400;
 const VR_UI_TOGGLE_BUTTON_INDEX = 4;
 const MODEL_X_OFFSET_METERS = 1;
 const VR_UI_PANEL_WIDTH = 0.46;
+const PMX_MODEL_SCALE = 0.1;
 const PMX_TEXTURE_EXTENSIONS = new Set([
   "bmp",
   "gif",
@@ -562,7 +563,7 @@ function resetActiveModelPosition() {
   currentModel.object.position.set(0, 0, 0);
   currentModel.object.position.x = activeModelIndex * MODEL_X_OFFSET_METERS;
   currentModel.object.rotation.set(0, 0, 0);
-  currentModel.object.scale.setScalar(1);
+  currentModel.object.scale.setScalar(getModelDefaultScale(currentModel));
 
   if (!renderer.xr.isPresenting) {
     frameModel(currentModel.object);
@@ -753,7 +754,8 @@ async function loadPmx(url, label, options = {}) {
     mesh.name = "LoadedPMX";
     mesh.position.set(loadedModels.length * MODEL_X_OFFSET_METERS, 0, 0);
     mesh.rotation.set(0, 0, 0);
-    mesh.scale.setScalar(1);
+    mesh.scale.setScalar(PMX_MODEL_SCALE);
+    preparePmxMaterials(mesh, label);
 
     const model = createModelRecord({
       type: "pmx",
@@ -849,6 +851,86 @@ function loadMmdModelWithExtension(loaderToUse, url, extension, resourcePath) {
       reject,
     );
   });
+}
+
+function preparePmxMaterials(object, label) {
+  const materialRows = [];
+
+  object.traverse((child) => {
+    if (!child.isMesh) return;
+
+    child.castShadow = true;
+    child.receiveShadow = true;
+
+    const materials = Array.isArray(child.material) ? child.material : [child.material];
+
+    materials.forEach((material, index) => {
+      if (!material) return;
+
+      configurePmxMaterial(material);
+
+      materialRows.push({
+        mesh: child.name || child.type,
+        slot: index,
+        material: material.name || "(unnamed)",
+        type: material.type,
+        map: getTextureDebugName(material.map),
+        emissiveMap: getTextureDebugName(material.emissiveMap),
+        aoMap: getTextureDebugName(material.aoMap),
+        lightMap: getTextureDebugName(material.lightMap),
+        envMap: getTextureDebugName(material.envMap),
+        color: material.color?.getHexString?.() ?? "",
+        emissive: material.emissive?.getHexString?.() ?? "",
+        opacity: material.opacity,
+        transparent: material.transparent,
+        side: material.side,
+      });
+    });
+  });
+
+  console.group(`[PMX] Materials for ${label}`);
+  console.log("renderer.outputColorSpace", renderer.outputColorSpace);
+  console.table(materialRows);
+  console.groupEnd();
+}
+
+function configurePmxMaterial(material) {
+  setTextureColorSpace(material.map, THREE.SRGBColorSpace);
+  setTextureColorSpace(material.emissiveMap, THREE.SRGBColorSpace);
+  setTextureColorSpace(material.lightMap, THREE.SRGBColorSpace);
+  setTextureColorSpace(material.aoMap, THREE.NoColorSpace);
+  setTextureColorSpace(material.normalMap, THREE.NoColorSpace);
+  setTextureColorSpace(material.bumpMap, THREE.NoColorSpace);
+  setTextureColorSpace(material.alphaMap, THREE.NoColorSpace);
+
+  if (material.envMap) {
+    setTextureColorSpace(material.envMap, THREE.SRGBColorSpace);
+    material.envMapIntensity = Math.min(material.envMapIntensity ?? 1, 0.35);
+  }
+
+  if (material.color) {
+    material.color.multiplyScalar(0.92);
+  }
+
+  if (material.emissive) {
+    material.emissive.multiplyScalar(0.35);
+  }
+
+  material.toneMapped = true;
+  material.needsUpdate = true;
+}
+
+function setTextureColorSpace(texture, colorSpace) {
+  if (!texture) return;
+
+  texture.colorSpace = colorSpace;
+  texture.needsUpdate = true;
+}
+
+function getTextureDebugName(texture) {
+  if (!texture) return "";
+
+  return texture.name || texture.source?.data?.src || texture.image?.src || "(loaded)";
 }
 
 async function createZipResourceUrls(entries) {
@@ -967,6 +1049,10 @@ function createModelRecord({ type, name, object, runtime, resourceUrls = [] }) {
     resourceUrls,
     visible: true,
   };
+}
+
+function getModelDefaultScale(model) {
+  return isPmxModel(model) ? PMX_MODEL_SCALE : 1;
 }
 
 function setActiveModel(index) {
