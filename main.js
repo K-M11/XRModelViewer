@@ -3,17 +3,25 @@ import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
 import { PointerLockControls } from "three/addons/controls/PointerLockControls.js";
 import { VRButton } from "three/addons/webxr/VRButton.js";
 import { VRMLoaderPlugin, VRMUtils } from "@pixiv/three-vrm";
+import {
+  createVRMAnimationClip,
+  VRMAnimationLoaderPlugin,
+  VRMLookAtQuaternionProxy,
+} from "@pixiv/three-vrm-animation";
 
 const DESKTOP_MOVE_SPEED = 2.5;
 const XR_MOVE_SPEED = 1.8;
-const XR_TURN_SPEED = Math.PI;
+const XR_TURN_SPEED = 0.5 * Math.PI;
 const XR_STICK_DEADZONE = 0.18;
 
 const statusEl = document.querySelector("#status");
 const fileInput = document.querySelector("#fileInput");
+const vrmaInput = document.querySelector("#vrmaInput");
 const urlInput = document.querySelector("#urlInput");
 const loadUrlButton = document.querySelector("#loadUrlButton");
 const lockPointerButton = document.querySelector("#lockPointerButton");
+const playAnimationButton = document.querySelector("#playAnimationButton");
+const stopAnimationButton = document.querySelector("#stopAnimationButton");
 
 const clock = new THREE.Clock();
 const moveState = {
@@ -39,6 +47,10 @@ const worldUp = new THREE.Vector3(0, 1, 0);
 
 let currentVrm = null;
 let currentObjectUrl = null;
+let currentVrmAnimation = null;
+let currentVrmaObjectUrl = null;
+let animationMixer = null;
+let animationAction = null;
 let lastXRAxesLogTime = 0;
 
 const scene = new THREE.Scene();
@@ -69,6 +81,9 @@ xrRig.add(controls.object);
 
 const loader = new GLTFLoader();
 loader.register((parser) => new VRMLoaderPlugin(parser));
+
+const vrmaLoader = new GLTFLoader();
+vrmaLoader.register((parser) => new VRMAnimationLoaderPlugin(parser));
 
 setupWorld();
 setupXRControllers();
@@ -126,6 +141,18 @@ function setupEvents() {
     loadVrm(currentObjectUrl, file.name);
   });
 
+  vrmaInput.addEventListener("change", () => {
+    const file = vrmaInput.files?.[0];
+    if (!file) return;
+
+    if (currentVrmaObjectUrl) {
+      URL.revokeObjectURL(currentVrmaObjectUrl);
+    }
+
+    currentVrmaObjectUrl = URL.createObjectURL(file);
+    loadVrma(currentVrmaObjectUrl, file.name);
+  });
+
   loadUrlButton.addEventListener("click", () => {
     const url = urlInput.value.trim();
     if (!url) {
@@ -144,6 +171,14 @@ function setupEvents() {
 
   lockPointerButton.addEventListener("click", () => {
     controls.lock();
+  });
+
+  playAnimationButton.addEventListener("click", () => {
+    playAnimation();
+  });
+
+  stopAnimationButton.addEventListener("click", () => {
+    stopAnimation();
   });
 
   controls.addEventListener("lock", () => {
@@ -193,24 +228,120 @@ async function loadVrm(url, label) {
     vrm.scene.rotation.set(0, 0, 0);
     vrm.scene.scale.setScalar(1);
 
+    setupLookAtProxy(vrm);
+
     scene.add(vrm.scene);
     currentVrm = vrm;
 
     frameModel(vrm.scene);
+    applyCurrentAnimation();
+    if (animationAction) {
+      playAnimation();
+    }
     setStatus(`Loaded ${label}. Enter VR with the VR button when using HTTPS.`);
 
-    // Future VRMA hook:
-    // loadVrmAnimation(vrm, "path/to/animation.vrma") can be added here once
-    // @pixiv/three-vrm-animation is wired into the import map and update loop.
   } catch (error) {
     console.error(error);
     setStatus(`Could not load VRM: ${error.message}`);
   }
 }
 
+async function loadVrma(url, label) {
+  setStatus(`Loading animation ${label}...`);
+
+  try {
+    const gltf = await vrmaLoader.loadAsync(url);
+    const vrmAnimation = gltf.userData.vrmAnimations?.[0];
+
+    if (!vrmAnimation) {
+      throw new Error("The loaded file did not contain VRMA animation data.");
+    }
+
+    currentVrmAnimation = vrmAnimation;
+
+    if (!currentVrm) {
+      setStatus(`Loaded animation ${label}. Load a VRM model to play it.`);
+      return;
+    }
+
+    applyCurrentAnimation();
+    playAnimation();
+    setStatus(`Playing animation ${label}.`);
+  } catch (error) {
+    console.error(error);
+    setStatus(`Could not load VRMA: ${error.message}`);
+  }
+}
+
+function applyCurrentAnimation() {
+  clearAnimation();
+
+  if (!currentVrm || !currentVrmAnimation) return;
+
+  currentVrm.humanoid?.resetNormalizedPose?.();
+  currentVrm.lookAt?.reset?.();
+  if (currentVrm.lookAt) {
+    currentVrm.lookAt.autoUpdate = currentVrmAnimation.lookAtTrack != null;
+  }
+
+  const clip = createVRMAnimationClip(currentVrmAnimation, currentVrm);
+  animationMixer = new THREE.AnimationMixer(currentVrm.scene);
+  animationAction = animationMixer.clipAction(clip);
+  animationAction.setLoop(THREE.LoopRepeat);
+  animationAction.clampWhenFinished = false;
+}
+
+function playAnimation() {
+  if (!animationAction) {
+    setStatus("Load both a VRM model and a VRMA animation first.");
+    return;
+  }
+
+  animationAction.paused = false;
+  animationAction.play();
+  setStatus("Animation playing.");
+}
+
+function stopAnimation() {
+  if (!animationAction) {
+    setStatus("No animation is loaded.");
+    return;
+  }
+
+  animationAction.stop();
+  currentVrm?.humanoid?.resetNormalizedPose?.();
+  currentVrm?.expressionManager?.resetValues?.();
+  setStatus("Animation stopped.");
+}
+
+function clearAnimation() {
+  if (!animationMixer) return;
+
+  animationMixer.stopAllAction();
+
+  if (currentVrm) {
+    animationMixer.uncacheRoot(currentVrm.scene);
+  }
+
+  animationMixer = null;
+  animationAction = null;
+}
+
+function setupLookAtProxy(vrm) {
+  if (!vrm.lookAt) return;
+
+  const proxyName = "lookAtQuaternionProxy";
+  if (vrm.scene.getObjectByName(proxyName)) return;
+
+  const lookAtProxy = new VRMLookAtQuaternionProxy(vrm.lookAt);
+  lookAtProxy.name = proxyName;
+  vrm.scene.add(lookAtProxy);
+}
+
 function clearCurrentVrm() {
   if (!currentVrm) return;
 
+  clearAnimation();
   scene.remove(currentVrm.scene);
   currentVrm.scene.traverse((object) => {
     if (!object.isMesh) return;
@@ -425,11 +556,14 @@ function render() {
 
   updateMovement(delta);
 
+  if (animationMixer) {
+    animationMixer.update(delta);
+  }
+
   if (currentVrm) {
     currentVrm.update(delta);
   }
 
-  // Future VRMA animation mixer updates should live here, next to VRM updates.
   renderer.render(scene, camera);
 }
 
