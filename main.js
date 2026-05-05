@@ -13,6 +13,8 @@ const DESKTOP_MOVE_SPEED = 2.5;
 const XR_MOVE_SPEED = 1.8;
 const XR_TURN_SPEED = 0.5 * Math.PI;
 const XR_STICK_DEADZONE = 0.18;
+const VR_UI_PANEL_DISTANCE = 1.25;
+const VR_UI_RAY_LENGTH = 4;
 
 const statusEl = document.querySelector("#status");
 const fileInput = document.querySelector("#fileInput");
@@ -44,14 +46,22 @@ const xrMove = new THREE.Vector3();
 const xrHeadPosition = new THREE.Vector3();
 const xrRigOffset = new THREE.Vector3();
 const worldUp = new THREE.Vector3(0, 1, 0);
+const uiRaycaster = new THREE.Raycaster();
+const uiRayOrigin = new THREE.Vector3();
+const uiRayDirection = new THREE.Vector3();
+const uiControllerMatrix = new THREE.Matrix4();
+const uiIntersectTargets = [];
 
+const models = [];
 let currentVrm = null;
+let currentModel = null;
 let currentObjectUrl = null;
 let currentVrmAnimation = null;
 let currentVrmaObjectUrl = null;
 let animationMixer = null;
 let animationAction = null;
 let lastXRAxesLogTime = 0;
+let vrUi = null;
 
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x1f232b);
@@ -86,6 +96,7 @@ const vrmaLoader = new GLTFLoader();
 vrmaLoader.register((parser) => new VRMAnimationLoaderPlugin(parser));
 
 setupWorld();
+setupVRUI();
 setupXRControllers();
 setupEvents();
 renderer.setAnimationLoop(render);
@@ -106,9 +117,144 @@ function setupWorld() {
   scene.add(grid);
 }
 
+function setupVRUI() {
+  const panel = new THREE.Group();
+  panel.name = "VRUIPanel";
+  panel.position.set(0, -0.28, -VR_UI_PANEL_DISTANCE);
+
+  const background = createVRUIPlane(0.92, 0.68, "#20242d");
+  background.material.opacity = 0.88;
+  background.position.z = -0.01;
+  panel.add(background);
+
+  const title = createVRUILabel("XR Model Viewer", 0.78, 0.08, {
+    fontSize: 34,
+    background: "#2b3340",
+    color: "#f5f7fb",
+  });
+  title.position.set(0, 0.25, 0);
+  panel.add(title);
+
+  const buttons = [
+    ["Load Model", requestModelFileLoad],
+    ["Load VRMA", requestMotionFileLoad],
+    ["Play Motion", playAnimation],
+    ["Stop Motion", stopAnimation],
+    ["Hide Panel", toggleVRUIPanel],
+  ];
+
+  buttons.forEach(([label, onSelect], index) => {
+    const button = createVRUIButton(label, onSelect);
+    button.position.set(0, 0.12 - index * 0.115, 0);
+    panel.add(button);
+    uiIntersectTargets.push(button);
+  });
+
+  const toggle = createVRUIButton("UI", toggleVRUIPanel, {
+    width: 0.22,
+    height: 0.1,
+    fontSize: 34,
+  });
+  toggle.name = "VRUIToggle";
+  toggle.position.set(0.43, -0.28, -VR_UI_PANEL_DISTANCE);
+  toggle.visible = false;
+  uiIntersectTargets.push(toggle);
+
+  camera.add(panel);
+  camera.add(toggle);
+
+  vrUi = {
+    panel,
+    toggle,
+    visible: true,
+  };
+}
+
+function createVRUIButton(label, onSelect, options = {}) {
+  const button = createVRUILabel(label, options.width ?? 0.72, options.height ?? 0.09, {
+    fontSize: options.fontSize ?? 28,
+    background: options.background ?? "#7dd3fc",
+    color: options.color ?? "#09111a",
+  });
+  button.name = `VRUIButton:${label}`;
+  button.userData.onSelect = onSelect;
+  button.userData.baseColor = button.material.color.clone();
+  return button;
+}
+
+function createVRUILabel(label, width, height, options = {}) {
+  const canvas = document.createElement("canvas");
+  canvas.width = 512;
+  canvas.height = 128;
+
+  const context = canvas.getContext("2d");
+  const background = options.background ?? "#ffffff";
+  const color = options.color ?? "#000000";
+  const fontSize = options.fontSize ?? 30;
+
+  context.fillStyle = background;
+  roundRect(context, 0, 0, canvas.width, canvas.height, 22);
+  context.fill();
+
+  context.fillStyle = color;
+  context.font = `700 ${fontSize}px system-ui, sans-serif`;
+  context.textAlign = "center";
+  context.textBaseline = "middle";
+  context.fillText(label, canvas.width / 2, canvas.height / 2);
+
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.colorSpace = THREE.SRGBColorSpace;
+
+  const material = new THREE.MeshBasicMaterial({
+    map: texture,
+    transparent: true,
+  });
+
+  const mesh = new THREE.Mesh(new THREE.PlaneGeometry(width, height), material);
+  mesh.userData.label = label;
+  return mesh;
+}
+
+function createVRUIPlane(width, height, color) {
+  const material = new THREE.MeshBasicMaterial({
+    color,
+    transparent: true,
+  });
+  return new THREE.Mesh(new THREE.PlaneGeometry(width, height), material);
+}
+
+function roundRect(context, x, y, width, height, radius) {
+  context.beginPath();
+  context.moveTo(x + radius, y);
+  context.lineTo(x + width - radius, y);
+  context.quadraticCurveTo(x + width, y, x + width, y + radius);
+  context.lineTo(x + width, y + height - radius);
+  context.quadraticCurveTo(x + width, y + height, x + width - radius, y + height);
+  context.lineTo(x + radius, y + height);
+  context.quadraticCurveTo(x, y + height, x, y + height - radius);
+  context.lineTo(x, y + radius);
+  context.quadraticCurveTo(x, y, x + radius, y);
+  context.closePath();
+}
+
+function createControllerRay() {
+  const geometry = new THREE.BufferGeometry().setFromPoints([
+    new THREE.Vector3(0, 0, 0),
+    new THREE.Vector3(0, 0, -VR_UI_RAY_LENGTH),
+  ]);
+  const material = new THREE.LineBasicMaterial({
+    color: 0x7dd3fc,
+    transparent: true,
+    opacity: 0.75,
+  });
+  return new THREE.Line(geometry, material);
+}
+
 function setupXRControllers() {
   for (let i = 0; i < 2; i += 1) {
     const controller = renderer.xr.getController(i);
+    const ray = createControllerRay();
+    controller.add(ray);
 
     controller.addEventListener("connected", (event) => {
       const handedness = event.data.handedness;
@@ -116,6 +262,14 @@ function setupXRControllers() {
         xrControllers[handedness] = controller;
         xrInputSources[handedness] = event.data;
       }
+    });
+
+    controller.addEventListener("selectstart", () => {
+      handleVRUISelect(controller);
+    });
+
+    controller.addEventListener("squeezestart", () => {
+      toggleVRUIPanel();
     });
 
     controller.addEventListener("disconnected", () => {
@@ -133,24 +287,14 @@ function setupEvents() {
     const file = fileInput.files?.[0];
     if (!file) return;
 
-    if (currentObjectUrl) {
-      URL.revokeObjectURL(currentObjectUrl);
-    }
-
-    currentObjectUrl = URL.createObjectURL(file);
-    loadVrm(currentObjectUrl, file.name);
+    loadModelFile(file);
   });
 
   vrmaInput.addEventListener("change", () => {
     const file = vrmaInput.files?.[0];
     if (!file) return;
 
-    if (currentVrmaObjectUrl) {
-      URL.revokeObjectURL(currentVrmaObjectUrl);
-    }
-
-    currentVrmaObjectUrl = URL.createObjectURL(file);
-    loadVrma(currentVrmaObjectUrl, file.name);
+    loadMotionFile(file);
   });
 
   loadUrlButton.addEventListener("click", () => {
@@ -191,6 +335,11 @@ function setupEvents() {
 
   window.addEventListener("keydown", (event) => updateMoveState(event, true));
   window.addEventListener("keyup", (event) => updateMoveState(event, false));
+  window.addEventListener("keydown", (event) => {
+    if (event.code === "KeyU") {
+      toggleVRUIPanel();
+    }
+  });
   window.addEventListener("resize", resize);
   window.addEventListener("error", (event) => {
     setStatus(`JavaScript error: ${event.message}`);
@@ -199,6 +348,92 @@ function setupEvents() {
     const reason = event.reason?.message ?? String(event.reason);
     setStatus(`JavaScript error: ${reason}`);
   });
+}
+
+function requestModelFileLoad() {
+  fileInput.click();
+  setStatus("Choose a VRM model file. If the picker is blocked in VR, use the desktop panel.");
+}
+
+function requestMotionFileLoad() {
+  vrmaInput.click();
+  setStatus("Choose a VRMA animation file. If the picker is blocked in VR, use the desktop panel.");
+}
+
+function loadModelFile(file) {
+  if (currentObjectUrl) {
+    URL.revokeObjectURL(currentObjectUrl);
+  }
+
+  currentObjectUrl = URL.createObjectURL(file);
+  loadVrm(currentObjectUrl, file.name);
+}
+
+function loadMotionFile(file) {
+  if (currentVrmaObjectUrl) {
+    URL.revokeObjectURL(currentVrmaObjectUrl);
+  }
+
+  currentVrmaObjectUrl = URL.createObjectURL(file);
+  loadVrma(currentVrmaObjectUrl, file.name);
+}
+
+function handleVRUISelect(controller) {
+  const hit = getVRUIIntersection(controller);
+  if (!hit) return;
+
+  hit.object.userData.onSelect?.();
+}
+
+function getVRUIIntersection(controller) {
+  uiControllerMatrix.identity().extractRotation(controller.matrixWorld);
+  uiRayOrigin.setFromMatrixPosition(controller.matrixWorld);
+  uiRayDirection.set(0, 0, -1).applyMatrix4(uiControllerMatrix);
+
+  uiRaycaster.set(uiRayOrigin, uiRayDirection);
+  uiRaycaster.far = VR_UI_RAY_LENGTH;
+
+  const hits = uiRaycaster.intersectObjects(getVisibleUIIntersectTargets(), false);
+  return hits[0] ?? null;
+}
+
+function getVisibleUIIntersectTargets() {
+  return uiIntersectTargets.filter((target) => {
+    let object = target;
+
+    while (object) {
+      if (!object.visible) return false;
+      object = object.parent;
+    }
+
+    return true;
+  });
+}
+
+function toggleVRUIPanel() {
+  if (!vrUi) return;
+
+  vrUi.visible = !vrUi.visible;
+  vrUi.panel.visible = vrUi.visible;
+  vrUi.toggle.visible = !vrUi.visible;
+  setStatus(vrUi.visible ? "VR UI panel shown." : "VR UI panel hidden.");
+}
+
+function updateVRUIHover() {
+  for (const target of uiIntersectTargets) {
+    target.material.color.copy(target.userData.baseColor);
+  }
+
+  if (!renderer.xr.isPresenting) return;
+
+  for (const controller of Object.values(xrControllers)) {
+    if (!controller) continue;
+
+    const hit = getVRUIIntersection(controller);
+    if (hit) {
+      hit.object.material.color.set(0xcffafe);
+    }
+  }
 }
 
 async function loadVrm(url, label) {
@@ -231,7 +466,14 @@ async function loadVrm(url, label) {
     setupLookAtProxy(vrm);
 
     scene.add(vrm.scene);
-    currentVrm = vrm;
+    currentModel = createModelRecord({
+      type: "vrm",
+      name: label,
+      object: vrm.scene,
+      runtime: vrm,
+    });
+    models.push(currentModel);
+    currentVrm = currentModel.runtime;
 
     frameModel(vrm.scene);
     applyCurrentAnimation();
@@ -244,6 +486,16 @@ async function loadVrm(url, label) {
     console.error(error);
     setStatus(`Could not load VRM: ${error.message}`);
   }
+}
+
+function createModelRecord({ type, name, object, runtime }) {
+  return {
+    id: globalThis.crypto?.randomUUID?.() ?? `${type}-${Date.now()}-${models.length}`,
+    type,
+    name,
+    object,
+    runtime,
+  };
 }
 
 async function loadVrma(url, label) {
@@ -356,7 +608,15 @@ function clearCurrentVrm() {
     }
   });
 
+  if (currentModel) {
+    const modelIndex = models.findIndex((model) => model.id === currentModel.id);
+    if (modelIndex !== -1) {
+      models.splice(modelIndex, 1);
+    }
+  }
+
   currentVrm = null;
+  currentModel = null;
 }
 
 function disposeMaterial(material) {
@@ -555,6 +815,7 @@ function render() {
   const delta = clock.getDelta();
 
   updateMovement(delta);
+  updateVRUIHover();
 
   if (animationMixer) {
     animationMixer.update(delta);
