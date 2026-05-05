@@ -26,6 +26,10 @@ const xrControllers = {
   left: null,
   right: null,
 };
+const xrInputSources = {
+  left: null,
+  right: null,
+};
 const xrForward = new THREE.Vector3();
 const xrRight = new THREE.Vector3();
 const xrMove = new THREE.Vector3();
@@ -35,6 +39,7 @@ const worldUp = new THREE.Vector3(0, 1, 0);
 
 let currentVrm = null;
 let currentObjectUrl = null;
+let lastXRAxesLogTime = 0;
 
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x1f232b);
@@ -94,12 +99,14 @@ function setupXRControllers() {
       const handedness = event.data.handedness;
       if (handedness === "left" || handedness === "right") {
         xrControllers[handedness] = controller;
+        xrInputSources[handedness] = event.data;
       }
     });
 
     controller.addEventListener("disconnected", () => {
       if (xrControllers.left === controller) xrControllers.left = null;
       if (xrControllers.right === controller) xrControllers.right = null;
+      syncXRInputSources();
     });
 
     xrRig.add(controller);
@@ -295,8 +302,12 @@ function updateMovement(delta) {
 }
 
 function updateXRMovement(delta) {
-  const leftStick = getControllerStick(xrControllers.left);
-  const rightStick = getControllerStick(xrControllers.right);
+  syncXRInputSources();
+
+  const leftStick = getInputSourceStick(xrInputSources.left);
+  const rightStick = getInputSourceStick(xrInputSources.right);
+
+  logXRInputDebug(leftStick, rightStick);
 
   if (rightStick.x !== 0) {
     rotateXRRigAroundHead(-rightStick.x * XR_TURN_SPEED * delta);
@@ -332,22 +343,81 @@ function rotateXRRigAroundHead(yawDelta) {
   xrRig.rotation.y += yawDelta;
 }
 
-function getControllerStick(controller) {
-  const axes = controller?.inputSource?.gamepad?.axes;
+function syncXRInputSources() {
+  xrInputSources.left = null;
+  xrInputSources.right = null;
+
+  const session = renderer.xr.getSession();
+  if (!session) return;
+
+  const unassignedSources = [];
+
+  for (const inputSource of session.inputSources) {
+    if (!inputSource.gamepad) continue;
+
+    if (inputSource.handedness === "left" || inputSource.handedness === "right") {
+      xrInputSources[inputSource.handedness] = inputSource;
+    } else {
+      unassignedSources.push(inputSource);
+    }
+  }
+
+  // Fallback for runtimes that omit handedness but still expose gamepad axes.
+  xrInputSources.left ??= unassignedSources[0] ?? null;
+  xrInputSources.right ??= unassignedSources[1] ?? null;
+}
+
+function getInputSourceStick(inputSource) {
+  const axes = inputSource?.gamepad?.axes;
   if (!axes || axes.length < 2) {
     return { x: 0, y: 0 };
   }
 
-  const axisOffset = axes.length >= 4 ? 2 : 0;
+  const primary = readAxesPair(axes, 2);
+  const fallback = readAxesPair(axes, 0);
+  const stick = primary.active ? primary : fallback;
 
   return {
-    x: applyDeadzone(axes[axisOffset] ?? 0),
-    y: applyDeadzone(axes[axisOffset + 1] ?? 0),
+    x: applyDeadzone(stick.x),
+    y: applyDeadzone(stick.y),
+  };
+}
+
+function readAxesPair(axes, startIndex) {
+  const x = axes[startIndex] ?? 0;
+  const y = axes[startIndex + 1] ?? 0;
+
+  return {
+    x,
+    y,
+    active: Math.abs(x) >= XR_STICK_DEADZONE || Math.abs(y) >= XR_STICK_DEADZONE,
   };
 }
 
 function applyDeadzone(value) {
   return Math.abs(value) < XR_STICK_DEADZONE ? 0 : value;
+}
+
+function logXRInputDebug(leftStick, rightStick) {
+  const now = performance.now();
+  if (now - lastXRAxesLogTime < 500) return;
+
+  lastXRAxesLogTime = now;
+
+  const leftAxes = Array.from(xrInputSources.left?.gamepad?.axes ?? []);
+  const rightAxes = Array.from(xrInputSources.right?.gamepad?.axes ?? []);
+
+  if (!xrInputSources.left && !xrInputSources.right) {
+    console.log("[WebXR] No controller gamepad input detected.");
+    return;
+  }
+
+  console.log("[WebXR] controller axes", {
+    leftAxes,
+    rightAxes,
+    leftStick,
+    rightStick,
+  });
 }
 
 function render() {
