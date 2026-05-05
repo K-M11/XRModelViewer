@@ -56,6 +56,10 @@ const uiRayOrigin = new THREE.Vector3();
 const uiRayDirection = new THREE.Vector3();
 const uiControllerMatrix = new THREE.Matrix4();
 const uiIntersectTargets = [];
+const modelDragControllerPosition = new THREE.Vector3();
+const modelDragStartPosition = new THREE.Vector3();
+const modelDragStartControllerPosition = new THREE.Vector3();
+const modelDragRaycaster = new THREE.Raycaster();
 
 const loadedModels = [];
 const loadedMotions = [];
@@ -69,6 +73,7 @@ let lastXRAxesLogTime = 0;
 let vrUi = null;
 let wasVRUIToggleButtonPressed = false;
 let lastXRButtonsLogTime = 0;
+let modelDrag = null;
 
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x1f232b);
@@ -307,7 +312,11 @@ function setupXRControllers() {
     });
 
     controller.addEventListener("squeezestart", () => {
-      toggleVRUIPanel();
+      startModelDrag(controller);
+    });
+
+    controller.addEventListener("squeezeend", () => {
+      endModelDrag(controller);
     });
 
     controller.addEventListener("disconnected", () => {
@@ -417,7 +426,8 @@ function updateVRUIStateLabel() {
 
   const modelName = currentModel?.name ?? "none";
   const motionName = currentModel?.currentMotion?.name ?? "none";
-  drawVRUILabel(vrUi.stateLabel, `Model: ${modelName} / Motion: ${motionName}`);
+  const x = currentModel ? currentModel.object.position.x.toFixed(1) : "-";
+  drawVRUILabel(vrUi.stateLabel, `Model: ${modelName} / Motion: ${motionName} / X:${x}`);
 }
 
 function renderModelList() {
@@ -523,6 +533,54 @@ function resetActiveModelPosition() {
   setStatus(`${currentModel.name} position reset.`);
 }
 
+function startModelDrag(controller) {
+  if (!currentModel?.object) {
+    setStatus("No active model to move.");
+    return;
+  }
+
+  const hitActiveModel = getActiveModelIntersection(controller);
+  if (!hitActiveModel) {
+    setStatus(`Moving active model: ${currentModel.name}`);
+  }
+
+  controller.getWorldPosition(modelDragStartControllerPosition);
+  modelDragStartPosition.copy(currentModel.object.position);
+
+  modelDrag = {
+    controller,
+    model: currentModel,
+  };
+}
+
+function updateModelDrag() {
+  if (!modelDrag) return;
+
+  modelDrag.controller.getWorldPosition(modelDragControllerPosition);
+  modelDrag.model.object.position
+    .copy(modelDragStartPosition)
+    .add(modelDragControllerPosition)
+    .sub(modelDragStartControllerPosition);
+}
+
+function endModelDrag(controller) {
+  if (!modelDrag || modelDrag.controller !== controller) return;
+
+  setStatus(`${modelDrag.model.name} moved.`);
+  modelDrag = null;
+  renderAssetLists();
+}
+
+function getActiveModelIntersection(controller) {
+  if (!currentModel?.object) return null;
+
+  setControllerRay(controller, uiRayOrigin, uiRayDirection);
+  modelDragRaycaster.set(uiRayOrigin, uiRayDirection);
+  modelDragRaycaster.far = VR_UI_RAY_LENGTH;
+
+  return modelDragRaycaster.intersectObject(currentModel.object, true)[0] ?? null;
+}
+
 function handleVRUISelect(controller) {
   const hit = getVRUIIntersection(controller);
   if (!hit) return;
@@ -531,15 +589,19 @@ function handleVRUISelect(controller) {
 }
 
 function getVRUIIntersection(controller) {
-  uiControllerMatrix.identity().extractRotation(controller.matrixWorld);
-  uiRayOrigin.setFromMatrixPosition(controller.matrixWorld);
-  uiRayDirection.set(0, 0, -1).applyMatrix4(uiControllerMatrix);
+  setControllerRay(controller, uiRayOrigin, uiRayDirection);
 
   uiRaycaster.set(uiRayOrigin, uiRayDirection);
   uiRaycaster.far = VR_UI_RAY_LENGTH;
 
   const hits = uiRaycaster.intersectObjects(getVisibleUIIntersectTargets(), false);
   return hits[0] ?? null;
+}
+
+function setControllerRay(controller, origin, direction) {
+  uiControllerMatrix.identity().extractRotation(controller.matrixWorld);
+  origin.setFromMatrixPosition(controller.matrixWorld);
+  direction.set(0, 0, -1).applyMatrix4(uiControllerMatrix);
 }
 
 function getVisibleUIIntersectTargets() {
@@ -1029,6 +1091,7 @@ function render() {
 
   updateMovement(delta);
   updateVRUIHover();
+  updateModelDrag();
 
   for (const model of loadedModels) {
     model.animationMixer?.update(delta);
