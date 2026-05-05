@@ -134,7 +134,7 @@ function setupWorld() {
 function setupVRUI() {
   const panel = new THREE.Group();
   panel.name = "VRUIPanel";
-  panel.position.set(-0.36, -0.24, -VR_UI_PANEL_DISTANCE);
+  panel.position.set(-0.36, 0, -VR_UI_PANEL_DISTANCE);
 
   const background = createVRUIPlane(VR_UI_PANEL_WIDTH, 0.82, "#20242d");
   background.material.opacity = 0.88;
@@ -149,13 +149,13 @@ function setupVRUI() {
   title.position.set(0, 0.33, 0);
   panel.add(title);
 
-  const stateLabel = createVRUILabel("M: none | A: none", 0.39, 0.07, {
-    fontSize: 18,
+  const stateLabel = createVRUILabel("Model: none\nAnim: none", 0.39, 0.15, {
+    fontSize: 28,
     background: "#111827",
     color: "#d9e0ee",
   });
   stateLabel.name = "VRUIStateLabel";
-  stateLabel.position.set(0, 0.24, 0);
+  stateLabel.position.set(0, 0.205, 0);
   panel.add(stateLabel);
 
   const buttons = [
@@ -170,17 +170,19 @@ function setupVRUI() {
 
   buttons.forEach(([label, onSelect], index) => {
     const button = createVRUIButton(label, onSelect);
-    button.position.set(0, 0.1 - index * 0.09, 0);
+    button.position.set(0, 0.045 - index * 0.09, 0);
     panel.add(button);
     uiIntersectTargets.push(button);
   });
 
   camera.add(panel);
 
+  panel.visible = false;
+
   vrUi = {
     panel,
     stateLabel,
-    visible: true,
+    visible: false,
   };
 
   updateVRUIStateLabel();
@@ -241,7 +243,14 @@ function drawVRUILabel(mesh, label) {
   context.font = `700 ${fontSize}px system-ui, sans-serif`;
   context.textAlign = "center";
   context.textBaseline = "middle";
-  context.fillText(label, canvas.width / 2, canvas.height / 2);
+
+  const lines = String(label).split("\n");
+  const lineHeight = fontSize * 1.2;
+  const startY = canvas.height / 2 - ((lines.length - 1) * lineHeight) / 2;
+
+  lines.forEach((line, index) => {
+    context.fillText(line, canvas.width / 2, startY + index * lineHeight);
+  });
 
   mesh.userData.label = label;
   mesh.userData.texture.needsUpdate = true;
@@ -415,12 +424,11 @@ function updateVRUIStateLabel() {
 
   const modelName = currentModel?.name ?? "none";
   const motionName = currentModel?.currentMotion?.name ?? "none";
-  const x = currentModel ? currentModel.object.position.x.toFixed(1) : "-";
-  drawVRUILabel(vrUi.stateLabel, `M:${shortLabel(modelName)} | A:${shortLabel(motionName)} | X:${x}`);
+  drawVRUILabel(vrUi.stateLabel, `Model: ${shortLabel(modelName)}\nAnim: ${shortLabel(motionName)}`);
 }
 
 function shortLabel(label) {
-  return label.length > 10 ? `${label.slice(0, 9)}...` : label;
+  return label.length > 11 ? `${label.slice(0, 10)}...` : label;
 }
 
 function renderModelList() {
