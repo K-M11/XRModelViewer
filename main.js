@@ -1,5 +1,6 @@
 import * as THREE from "three";
 import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
+import { MMDLoader } from "three/addons/loaders/MMDLoader.js";
 import { PointerLockControls } from "three/addons/controls/PointerLockControls.js";
 import { VRButton } from "three/addons/webxr/VRButton.js";
 import { VRMLoaderPlugin, VRMUtils } from "@pixiv/three-vrm";
@@ -104,6 +105,8 @@ xrRig.add(controls.object);
 
 const loader = new GLTFLoader();
 loader.register((parser) => new VRMLoaderPlugin(parser));
+
+const mmdLoader = new MMDLoader();
 
 const vrmaLoader = new GLTFLoader();
 vrmaLoader.register((parser) => new VRMAnimationLoaderPlugin(parser));
@@ -401,6 +404,12 @@ function loadModelFile(file) {
   }
 
   currentObjectUrl = URL.createObjectURL(file);
+
+  if (isPmxFile(file.name)) {
+    loadPmx(currentObjectUrl, file.name);
+    return;
+  }
+
   loadVrm(currentObjectUrl, file.name);
 }
 
@@ -442,12 +451,24 @@ function renderModelList() {
   loadedModels.forEach((model, index) => {
     const item = createAssetListButton({
       label: `${index + 1}. ${model.name}`,
-      detail: model.currentMotion?.name ?? "No motion",
+      detail: getModelListDetail(model),
       active: index === activeModelIndex,
       onClick: () => setActiveModel(index),
     });
     modelListEl.append(item);
   });
+}
+
+function getModelListDetail(model) {
+  if (model.type === "vrm") {
+    return model.currentMotion?.name ?? "VRM / No motion";
+  }
+
+  if (model.type === "pmx") {
+    return "PMX / Static";
+  }
+
+  return model.type.toUpperCase();
 }
 
 function renderMotionList() {
@@ -704,6 +725,36 @@ async function loadVrm(url, label) {
   }
 }
 
+async function loadPmx(url, label) {
+  setStatus(`Loading PMX ${label}...`);
+
+  try {
+    const mesh = await mmdLoader.loadAsync(url);
+
+    mesh.name = "LoadedPMX";
+    mesh.position.set(loadedModels.length * MODEL_X_OFFSET_METERS, 0, 0);
+    mesh.rotation.set(0, 0, 0);
+    mesh.scale.setScalar(1);
+
+    const model = createModelRecord({
+      type: "pmx",
+      name: label,
+      object: mesh,
+      runtime: mesh,
+    });
+
+    loadedModels.push(model);
+    scene.add(model.object);
+    setActiveModel(loadedModels.length - 1);
+    renderAssetLists();
+
+    setStatus(`Loaded PMX ${label}. VMD playback is not enabled yet.`);
+  } catch (error) {
+    console.error(error);
+    setStatus(`Could not load PMX: ${error.message}`);
+  }
+}
+
 function createModelRecord({ type, name, object, runtime }) {
   return {
     id: globalThis.crypto?.randomUUID?.() ?? `${type}-${Date.now()}-${loadedModels.length}`,
@@ -762,6 +813,11 @@ async function loadVrma(url, label) {
     setActiveMotion(loadedMotions.length - 1);
     renderAssetLists();
 
+    if (isPmxModel(currentModel)) {
+      setStatus(`Loaded motion ${label}. PMX VMD playback is not enabled yet.`);
+      return;
+    }
+
     if (!currentVrm) {
       setStatus(`Loaded motion ${label}. Select a VRM model to apply it.`);
       return;
@@ -789,7 +845,7 @@ function setActiveMotion(index) {
   activeMotionIndex = index;
   const motion = loadedMotions[activeMotionIndex];
 
-  if (currentModel?.type === "vrm") {
+  if (isVrmModel(currentModel)) {
     currentModel.currentMotion = motion;
     applyMotionToModel(currentModel, motion);
   }
@@ -798,6 +854,8 @@ function setActiveMotion(index) {
 
   if (currentModel?.animationAction) {
     playAnimation();
+  } else if (isPmxModel(currentModel)) {
+    setStatus(`Active motion: ${motion.name}. PMX VMD playback is not enabled yet.`);
   } else {
     setStatus(`Active motion: ${motion.name}`);
   }
@@ -824,6 +882,11 @@ function applyMotionToModel(model, motion) {
 
 function playAnimation() {
   if (!currentModel?.animationAction) {
+    if (isPmxModel(currentModel)) {
+      setStatus("PMX VMD playback is not enabled yet.");
+      return;
+    }
+
     setStatus("Select a VRM model and apply a VRMA motion first.");
     return;
   }
@@ -856,6 +919,18 @@ function clearModelAnimation(model) {
 
   model.animationMixer = null;
   model.animationAction = null;
+}
+
+function isVrmModel(model) {
+  return model?.type === "vrm";
+}
+
+function isPmxModel(model) {
+  return model?.type === "pmx";
+}
+
+function isPmxFile(fileName) {
+  return fileName.toLowerCase().endsWith(".pmx");
 }
 
 function setupLookAtProxy(vrm) {
