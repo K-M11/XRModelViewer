@@ -1,4 +1,5 @@
 import * as THREE from "three";
+import JSZip from "jszip";
 import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
 import { MMDLoader } from "three/addons/loaders/MMDLoader.js";
 import { PointerLockControls } from "three/addons/controls/PointerLockControls.js";
@@ -20,6 +21,15 @@ const VR_UI_TEXTURE_PIXELS_PER_METER = 1400;
 const VR_UI_TOGGLE_BUTTON_INDEX = 4;
 const MODEL_X_OFFSET_METERS = 1;
 const VR_UI_PANEL_WIDTH = 0.46;
+const PMX_TEXTURE_EXTENSIONS = new Set([
+  "bmp",
+  "gif",
+  "jpg",
+  "jpeg",
+  "png",
+  "tga",
+  "webp",
+]);
 
 const statusEl = document.querySelector("#status");
 const fileInput = document.querySelector("#fileInput");
@@ -401,6 +411,12 @@ function setupEvents() {
 function loadModelFile(file) {
   if (currentObjectUrl) {
     URL.revokeObjectURL(currentObjectUrl);
+    currentObjectUrl = null;
+  }
+
+  if (isZipFile(file.name)) {
+    loadPmxZip(file);
+    return;
   }
 
   currentObjectUrl = URL.createObjectURL(file);
@@ -509,7 +525,7 @@ function createAssetListEmpty(label) {
 
 function selectNextModel() {
   if (loadedModels.length === 0) {
-    setStatus("No models loaded. Load VRM before entering VR.");
+    setStatus("No models loaded. Load a VRM or PMX zip before entering VR.");
     return;
   }
 
@@ -725,11 +741,12 @@ async function loadVrm(url, label) {
   }
 }
 
-async function loadPmx(url, label) {
+async function loadPmx(url, label, options = {}) {
   setStatus(`Loading PMX ${label}...`);
 
   try {
-    const mesh = await mmdLoader.loadAsync(url);
+    const loaderToUse = options.loader ?? mmdLoader;
+    const mesh = await loaderToUse.loadAsync(url);
 
     mesh.name = "LoadedPMX";
     mesh.position.set(loadedModels.length * MODEL_X_OFFSET_METERS, 0, 0);
@@ -741,6 +758,7 @@ async function loadPmx(url, label) {
       name: label,
       object: mesh,
       runtime: mesh,
+      resourceUrls: options.resourceUrls,
     });
 
     loadedModels.push(model);
@@ -751,11 +769,166 @@ async function loadPmx(url, label) {
     setStatus(`Loaded PMX ${label}. VMD playback is not enabled yet.`);
   } catch (error) {
     console.error(error);
+    revokeObjectUrls(options.resourceUrls);
     setStatus(`Could not load PMX: ${error.message}`);
   }
 }
 
-function createModelRecord({ type, name, object, runtime }) {
+async function loadPmxZip(file) {
+  setStatus(`Loading PMX zip ${file.name}...`);
+
+  let zipFileNames = [];
+
+  try {
+    const zip = await JSZip.loadAsync(file);
+    const entries = Object.values(zip.files).filter((entry) => !entry.dir);
+    zipFileNames = entries.map((entry) => entry.name);
+
+    const pmxEntries = entries.filter((entry) => isPmxFile(entry.name));
+
+    if (pmxEntries.length === 0) {
+      console.group(`[PMX zip] No PMX found in ${file.name}`);
+      console.table(zipFileNames);
+      console.groupEnd();
+      throw new Error("No .pmx file was found in the zip.");
+    }
+
+    if (pmxEntries.length > 1) {
+      console.warn(
+        `[PMX zip] Multiple PMX files found in ${file.name}; using the first one.`,
+        pmxEntries.map((entry) => entry.name),
+      );
+    }
+
+    const pmxEntry = pmxEntries[0];
+    const zipResources = await createZipResourceUrls(entries);
+    const pmxUrl = zipResources.byName.get(normalizeZipPath(pmxEntry.name));
+    if (!pmxUrl) {
+      throw new Error(`Could not create a Blob URL for ${pmxEntry.name}.`);
+    }
+
+    const manager = createPmxZipLoadingManager(zipResources, getZipDirectory(pmxEntry.name));
+    const zipMmdLoader = new MMDLoader(manager);
+    zipMmdLoader.setResourcePath("/");
+
+    await loadPmx(pmxUrl, `${file.name} / ${getZipBaseName(pmxEntry.name)}`, {
+      loader: zipMmdLoader,
+      resourceUrls: zipResources.urls,
+    });
+  } catch (error) {
+    console.error(error);
+    if (zipFileNames.length > 0) {
+      console.group(`[PMX zip] Files in ${file.name}`);
+      console.table(zipFileNames);
+      console.groupEnd();
+    }
+    setStatus(`Could not load PMX zip: ${error.message}`);
+  }
+}
+
+async function createZipResourceUrls(entries) {
+  const byName = new Map();
+  const byBaseName = new Map();
+  const duplicateBaseNames = new Set();
+  const urls = [];
+
+  for (const entry of entries) {
+    const blob = await entry.async("blob");
+    const url = URL.createObjectURL(blob);
+    const normalizedName = normalizeZipPath(entry.name);
+    const normalizedBaseName = normalizeZipPath(getZipBaseName(entry.name));
+
+    byName.set(normalizedName, url);
+    urls.push(url);
+
+    if (byBaseName.has(normalizedBaseName)) {
+      duplicateBaseNames.add(normalizedBaseName);
+    } else {
+      byBaseName.set(normalizedBaseName, url);
+    }
+  }
+
+  for (const duplicate of duplicateBaseNames) {
+    byBaseName.delete(duplicate);
+  }
+
+  return {
+    byName,
+    byBaseName,
+    urls,
+  };
+}
+
+function createPmxZipLoadingManager(zipResources, pmxDirectory) {
+  const manager = new THREE.LoadingManager();
+
+  manager.setURLModifier((url) => {
+    const resolvedUrl = resolveZipResourceUrl(url, zipResources, pmxDirectory);
+
+    if (!resolvedUrl && isTexturePath(url)) {
+      console.warn(`[PMX zip] Texture not found in zip: ${url}`);
+    }
+
+    return resolvedUrl ?? url;
+  });
+
+  return manager;
+}
+
+function resolveZipResourceUrl(url, zipResources, pmxDirectory) {
+  if (url.startsWith("blob:")) return url;
+
+  const normalizedUrl = normalizeZipPath(url);
+  const pmxRelativeUrl = normalizeZipPath(`${pmxDirectory}/${normalizedUrl}`);
+
+  return (
+    zipResources.byName.get(normalizedUrl) ??
+    zipResources.byName.get(pmxRelativeUrl) ??
+    zipResources.byBaseName.get(normalizeZipPath(getZipBaseName(normalizedUrl))) ??
+    null
+  );
+}
+
+function normalizeZipPath(path) {
+  let normalized = String(path);
+
+  try {
+    normalized = decodeURIComponent(normalized);
+  } catch {
+    // Keep the original path if it is not URI-encoded.
+  }
+
+  return normalized
+    .replace(/[?#].*$/, "")
+    .replace(/\\/g, "/")
+    .replace(/^\.?\//, "")
+    .replace(/^\/+/, "")
+    .replace(/\/+/g, "/")
+    .toLowerCase()
+    .split("/")
+    .reduce((parts, part) => {
+      if (!part || part === ".") return parts;
+      if (part === "..") {
+        parts.pop();
+        return parts;
+      }
+      parts.push(part);
+      return parts;
+    }, [])
+    .join("/");
+}
+
+function getZipDirectory(path) {
+  const normalized = normalizeZipPath(path);
+  const slashIndex = normalized.lastIndexOf("/");
+  return slashIndex === -1 ? "" : normalized.slice(0, slashIndex);
+}
+
+function getZipBaseName(path) {
+  return String(path).replace(/\\/g, "/").split("/").pop() ?? "";
+}
+
+function createModelRecord({ type, name, object, runtime, resourceUrls = [] }) {
   return {
     id: globalThis.crypto?.randomUUID?.() ?? `${type}-${Date.now()}-${loadedModels.length}`,
     type,
@@ -766,6 +939,7 @@ function createModelRecord({ type, name, object, runtime }) {
     currentMotion: null,
     animationMixer: null,
     animationAction: null,
+    resourceUrls,
     visible: true,
   };
 }
@@ -921,6 +1095,12 @@ function clearModelAnimation(model) {
   model.animationAction = null;
 }
 
+function revokeObjectUrls(urls = []) {
+  for (const url of urls) {
+    URL.revokeObjectURL(url);
+  }
+}
+
 function isVrmModel(model) {
   return model?.type === "vrm";
 }
@@ -931,6 +1111,15 @@ function isPmxModel(model) {
 
 function isPmxFile(fileName) {
   return fileName.toLowerCase().endsWith(".pmx");
+}
+
+function isZipFile(fileName) {
+  return fileName.toLowerCase().endsWith(".zip");
+}
+
+function isTexturePath(path) {
+  const extension = normalizeZipPath(path).split(".").pop();
+  return PMX_TEXTURE_EXTENSIONS.has(extension);
 }
 
 function setupLookAtProxy(vrm) {
