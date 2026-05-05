@@ -112,7 +112,8 @@
         "imports": {
           "three": "https://cdn.jsdelivr.net/npm/three@0.180.0/build/three.module.js",
           "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.180.0/examples/jsm/",
-          "@pixiv/three-vrm": "https://cdn.jsdelivr.net/npm/@pixiv/three-vrm@3.5.2/lib/three-vrm.module.min.js"
+          "@pixiv/three-vrm": "https://cdn.jsdelivr.net/npm/@pixiv/three-vrm@3.5.2/lib/three-vrm.module.min.js",
+          "@pixiv/three-vrm-animation": "https://cdn.jsdelivr.net/npm/@pixiv/three-vrm-animation@3.5.2/lib/three-vrm-animation.module.min.js"
         }
       }
     </script>
@@ -124,6 +125,11 @@
       <label>
         <span class="hint">Local VRM</span>
         <input id="fileInput" type="file" accept=".vrm,model/gltf-binary" />
+      </label>
+
+      <label>
+        <span class="hint">Local VRMA Animation</span>
+        <input id="vrmaInput" type="file" accept=".vrma,model/gltf-binary" />
       </label>
 
       <div class="controls">
@@ -139,6 +145,15 @@
       <button id="lockPointerButton" class="secondary" type="button">
         Mouse Look
       </button>
+
+      <div class="controls">
+        <button id="playAnimationButton" class="secondary" type="button">
+          Play Animation
+        </button>
+        <button id="stopAnimationButton" class="secondary" type="button">
+          Stop
+        </button>
+      </div>
 
       <p class="hint">Move with WASD or arrow keys. Press Esc to release mouse look.</p>
       <p id="status" class="status">Choose a local VRM file or load one from a URL.</p>
