@@ -4,6 +4,11 @@ import { PointerLockControls } from "three/addons/controls/PointerLockControls.j
 import { VRButton } from "three/addons/webxr/VRButton.js";
 import { VRMLoaderPlugin, VRMUtils } from "@pixiv/three-vrm";
 
+const DESKTOP_MOVE_SPEED = 2.5;
+const XR_MOVE_SPEED = 1.8;
+const XR_TURN_SPEED = Math.PI;
+const XR_STICK_DEADZONE = 0.18;
+
 const statusEl = document.querySelector("#status");
 const fileInput = document.querySelector("#fileInput");
 const urlInput = document.querySelector("#urlInput");
@@ -17,6 +22,16 @@ const moveState = {
   left: false,
   right: false,
 };
+const xrControllers = {
+  left: null,
+  right: null,
+};
+const xrForward = new THREE.Vector3();
+const xrRight = new THREE.Vector3();
+const xrMove = new THREE.Vector3();
+const xrHeadPosition = new THREE.Vector3();
+const xrRigOffset = new THREE.Vector3();
+const worldUp = new THREE.Vector3(0, 1, 0);
 
 let currentVrm = null;
 let currentObjectUrl = null;
@@ -32,6 +47,10 @@ const camera = new THREE.PerspectiveCamera(
 );
 camera.position.set(0, 1.45, 3);
 
+const xrRig = new THREE.Group();
+xrRig.name = "XRRig";
+scene.add(xrRig);
+
 const renderer = new THREE.WebGLRenderer({ antialias: true });
 renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
 renderer.setSize(window.innerWidth, window.innerHeight);
@@ -41,12 +60,13 @@ document.body.appendChild(renderer.domElement);
 document.body.appendChild(VRButton.createButton(renderer));
 
 const controls = new PointerLockControls(camera, renderer.domElement);
-scene.add(controls.object);
+xrRig.add(controls.object);
 
 const loader = new GLTFLoader();
 loader.register((parser) => new VRMLoaderPlugin(parser));
 
 setupWorld();
+setupXRControllers();
 setupEvents();
 renderer.setAnimationLoop(render);
 
@@ -64,6 +84,26 @@ function setupWorld() {
 
   const grid = new THREE.GridHelper(10, 20, 0x526071, 0x303844);
   scene.add(grid);
+}
+
+function setupXRControllers() {
+  for (let i = 0; i < 2; i += 1) {
+    const controller = renderer.xr.getController(i);
+
+    controller.addEventListener("connected", (event) => {
+      const handedness = event.data.handedness;
+      if (handedness === "left" || handedness === "right") {
+        xrControllers[handedness] = controller;
+      }
+    });
+
+    controller.addEventListener("disconnected", () => {
+      if (xrControllers.left === controller) xrControllers.left = null;
+      if (xrControllers.right === controller) xrControllers.right = null;
+    });
+
+    xrRig.add(controller);
+  }
 }
 
 function setupEvents() {
@@ -199,6 +239,8 @@ function frameModel(object) {
   const center = box.getCenter(new THREE.Vector3());
 
   if (!Number.isFinite(size.length()) || size.length() === 0) {
+    xrRig.position.set(0, 0, 0);
+    xrRig.rotation.set(0, 0, 0);
     camera.position.set(0, 1.45, 3);
     camera.lookAt(0, 1.2, 0);
     return;
@@ -207,6 +249,8 @@ function frameModel(object) {
   const height = Math.max(size.y, 1);
   const distance = Math.max(height * 1.5, 2.2);
 
+  xrRig.position.set(0, 0, 0);
+  xrRig.rotation.set(0, 0, 0);
   controls.object.position.set(center.x, center.y + height * 0.35, distance);
   camera.lookAt(center.x, center.y + height * 0.45, center.z);
 }
@@ -237,14 +281,73 @@ function updateMoveState(event, pressed) {
 }
 
 function updateMovement(delta) {
-  if (renderer.xr.isPresenting) return;
+  if (renderer.xr.isPresenting) {
+    updateXRMovement(delta);
+    return;
+  }
 
-  const speed = 2.5 * delta;
+  const speed = DESKTOP_MOVE_SPEED * delta;
 
   if (moveState.forward) controls.moveForward(speed);
   if (moveState.backward) controls.moveForward(-speed);
   if (moveState.left) controls.moveRight(-speed);
   if (moveState.right) controls.moveRight(speed);
+}
+
+function updateXRMovement(delta) {
+  const leftStick = getControllerStick(xrControllers.left);
+  const rightStick = getControllerStick(xrControllers.right);
+
+  if (rightStick.x !== 0) {
+    rotateXRRigAroundHead(-rightStick.x * XR_TURN_SPEED * delta);
+  }
+
+  if (leftStick.x === 0 && leftStick.y === 0) return;
+
+  camera.getWorldDirection(xrForward);
+  xrForward.y = 0;
+
+  if (xrForward.lengthSq() === 0) return;
+
+  xrForward.normalize();
+  xrRight.copy(xrForward).cross(worldUp).normalize();
+
+  xrMove
+    .copy(xrForward)
+    .multiplyScalar(-leftStick.y)
+    .addScaledVector(xrRight, leftStick.x);
+
+  if (xrMove.lengthSq() > 1) {
+    xrMove.normalize();
+  }
+
+  xrRig.position.addScaledVector(xrMove, XR_MOVE_SPEED * delta);
+}
+
+function rotateXRRigAroundHead(yawDelta) {
+  camera.getWorldPosition(xrHeadPosition);
+  xrRigOffset.copy(xrRig.position).sub(xrHeadPosition);
+  xrRigOffset.applyAxisAngle(worldUp, yawDelta);
+  xrRig.position.copy(xrHeadPosition).add(xrRigOffset);
+  xrRig.rotation.y += yawDelta;
+}
+
+function getControllerStick(controller) {
+  const axes = controller?.inputSource?.gamepad?.axes;
+  if (!axes || axes.length < 2) {
+    return { x: 0, y: 0 };
+  }
+
+  const axisOffset = axes.length >= 4 ? 2 : 0;
+
+  return {
+    x: applyDeadzone(axes[axisOffset] ?? 0),
+    y: applyDeadzone(axes[axisOffset + 1] ?? 0),
+  };
+}
+
+function applyDeadzone(value) {
+  return Math.abs(value) < XR_STICK_DEADZONE ? 0 : value;
 }
 
 function render() {
