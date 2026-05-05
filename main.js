@@ -404,8 +404,9 @@ function toggleActiveModelVisibility() {
     return;
   }
 
-  currentModel.object.visible = !currentModel.object.visible;
-  setStatus(`${currentModel.name} ${currentModel.object.visible ? "shown" : "hidden"}.`);
+  currentModel.visible = !currentModel.visible;
+  currentModel.object.visible = currentModel.visible;
+  setStatus(`${currentModel.name} ${currentModel.visible ? "shown" : "hidden"}.`);
 }
 
 function resetActiveModelPosition() {
@@ -520,6 +521,9 @@ async function loadVrm(url, label) {
     loadedModels.push(model);
     scene.add(model.object);
     setActiveModel(loadedModels.length - 1);
+    if (activeMotionIndex !== -1) {
+      setActiveMotion(activeMotionIndex);
+    }
 
     setStatus(`Loaded ${label}. Enter VR with the VR button when using HTTPS.`);
 
@@ -535,7 +539,10 @@ function createModelRecord({ type, name, object, runtime }) {
     type,
     name,
     object,
-    runtime,
+    vrm: type === "vrm" ? runtime : null,
+    pmx: type === "pmx" ? runtime : null,
+    currentMotion: null,
+    visible: true,
   };
 }
 
@@ -545,13 +552,16 @@ function setActiveModel(index) {
   clearAnimation();
   activeModelIndex = index;
   currentModel = loadedModels[activeModelIndex];
-  currentVrm = currentModel.type === "vrm" ? currentModel.runtime : null;
+  currentVrm = currentModel.vrm;
 
-  loadedModels.forEach((model, modelIndex) => {
-    model.object.visible = modelIndex === activeModelIndex;
+  loadedModels.forEach((model) => {
+    model.object.visible = model.visible;
   });
 
-  frameModel(currentModel.object);
+  if (!renderer.xr.isPresenting) {
+    frameModel(currentModel.object);
+  }
+
   applyCurrentAnimation();
 
   if (animationAction) {
@@ -581,11 +591,11 @@ async function loadVrma(url, label) {
     setActiveMotion(loadedMotions.length - 1);
 
     if (!currentVrm) {
-      setStatus(`Loaded animation ${label}. Load a VRM model to play it.`);
+      setStatus(`Loaded motion ${label}. Select a VRM model to apply it.`);
       return;
     }
 
-    setStatus(`Playing animation ${label}.`);
+    setStatus(`Applied motion ${label} to ${currentModel.name}.`);
   } catch (error) {
     console.error(error);
     setStatus(`Could not load VRMA: ${error.message}`);
@@ -605,9 +615,13 @@ function setActiveMotion(index) {
   if (index < 0 || index >= loadedMotions.length) return;
 
   activeMotionIndex = index;
-  applyCurrentAnimation();
-
   const motion = loadedMotions[activeMotionIndex];
+
+  if (currentModel?.type === "vrm") {
+    currentModel.currentMotion = motion;
+  }
+
+  applyCurrentAnimation();
 
   if (animationAction) {
     playAnimation();
@@ -619,9 +633,13 @@ function setActiveMotion(index) {
 function applyCurrentAnimation() {
   clearAnimation();
 
-  const motion = loadedMotions[activeMotionIndex];
+  const motion = currentModel?.currentMotion;
 
   if (!currentVrm || !motion) return;
+
+  if (currentModel) {
+    currentModel.currentMotion = motion;
+  }
 
   currentVrm.humanoid?.resetNormalizedPose?.();
   currentVrm.lookAt?.reset?.();
@@ -921,8 +939,8 @@ function render() {
     animationMixer.update(delta);
   }
 
-  if (currentVrm) {
-    currentVrm.update(delta);
+  for (const model of loadedModels) {
+    model.vrm?.update(delta);
   }
 
   renderer.render(scene, camera);
