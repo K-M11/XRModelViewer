@@ -15,6 +15,8 @@ const XR_TURN_SPEED = 0.5 * Math.PI;
 const XR_STICK_DEADZONE = 0.18;
 const VR_UI_PANEL_DISTANCE = 1.25;
 const VR_UI_RAY_LENGTH = 4;
+const VR_UI_TEXTURE_PIXELS_PER_METER = 1400;
+const VR_UI_TOGGLE_BUTTON_INDEX = 4;
 
 const statusEl = document.querySelector("#status");
 const fileInput = document.querySelector("#fileInput");
@@ -62,6 +64,8 @@ let animationMixer = null;
 let animationAction = null;
 let lastXRAxesLogTime = 0;
 let vrUi = null;
+let wasVRUIToggleButtonPressed = false;
+let lastXRButtonsLogTime = 0;
 
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x1f232b);
@@ -184,16 +188,17 @@ function createVRUIButton(label, onSelect, options = {}) {
 
 function createVRUILabel(label, width, height, options = {}) {
   const canvas = document.createElement("canvas");
-  canvas.width = 512;
-  canvas.height = 128;
+  canvas.width = Math.ceil(width * VR_UI_TEXTURE_PIXELS_PER_METER);
+  canvas.height = Math.ceil(height * VR_UI_TEXTURE_PIXELS_PER_METER);
 
   const context = canvas.getContext("2d");
   const background = options.background ?? "#ffffff";
   const color = options.color ?? "#000000";
-  const fontSize = options.fontSize ?? 30;
+  const fontSize = Math.round(options.fontSize ?? canvas.height * 0.36);
+  const radius = Math.max(16, Math.round(canvas.height * 0.22));
 
   context.fillStyle = background;
-  roundRect(context, 0, 0, canvas.width, canvas.height, 22);
+  roundRect(context, 0, 0, canvas.width, canvas.height, radius);
   context.fill();
 
   context.fillStyle = color;
@@ -204,6 +209,9 @@ function createVRUILabel(label, width, height, options = {}) {
 
   const texture = new THREE.CanvasTexture(canvas);
   texture.colorSpace = THREE.SRGBColorSpace;
+  texture.anisotropy = renderer.capabilities.getMaxAnisotropy();
+  texture.minFilter = THREE.LinearFilter;
+  texture.magFilter = THREE.LinearFilter;
 
   const material = new THREE.MeshBasicMaterial({
     map: texture,
@@ -351,13 +359,23 @@ function setupEvents() {
 }
 
 function requestModelFileLoad() {
+  if (renderer.xr.isPresenting) {
+    setStatus("VR file picker is browser-limited. Exit VR or use the desktop panel to load a model.");
+    return;
+  }
+
   fileInput.click();
-  setStatus("Choose a VRM model file. If the picker is blocked in VR, use the desktop panel.");
+  setStatus("Choose a VRM model file.");
 }
 
 function requestMotionFileLoad() {
+  if (renderer.xr.isPresenting) {
+    setStatus("VR file picker is browser-limited. Exit VR or use the desktop panel to load VRMA.");
+    return;
+  }
+
   vrmaInput.click();
-  setStatus("Choose a VRMA animation file. If the picker is blocked in VR, use the desktop panel.");
+  setStatus("Choose a VRMA animation file.");
 }
 
 function loadModelFile(file) {
@@ -694,6 +712,7 @@ function updateMovement(delta) {
 
 function updateXRMovement(delta) {
   syncXRInputSources();
+  updateVRUIToggleButton();
 
   const leftStick = getInputSourceStick(xrInputSources.left);
   const rightStick = getInputSourceStick(xrInputSources.right);
@@ -724,6 +743,41 @@ function updateXRMovement(delta) {
   }
 
   xrRig.position.addScaledVector(xrMove, XR_MOVE_SPEED * delta);
+}
+
+function updateVRUIToggleButton() {
+  logXRButtonDebug();
+
+  const button =
+    xrInputSources.right?.gamepad?.buttons?.[VR_UI_TOGGLE_BUTTON_INDEX] ??
+    xrInputSources.left?.gamepad?.buttons?.[VR_UI_TOGGLE_BUTTON_INDEX];
+
+  const pressed = button?.pressed ?? false;
+
+  if (pressed && !wasVRUIToggleButtonPressed) {
+    toggleVRUIPanel();
+  }
+
+  wasVRUIToggleButtonPressed = pressed;
+}
+
+function logXRButtonDebug() {
+  const now = performance.now();
+  if (now - lastXRButtonsLogTime < 1000) return;
+
+  const rightButtons = getPressedButtonIndexes(xrInputSources.right);
+  const leftButtons = getPressedButtonIndexes(xrInputSources.left);
+  if (rightButtons.length === 0 && leftButtons.length === 0) return;
+
+  lastXRButtonsLogTime = now;
+  console.log("[WebXR] pressed buttons", { leftButtons, rightButtons });
+}
+
+function getPressedButtonIndexes(inputSource) {
+  const buttons = inputSource?.gamepad?.buttons ?? [];
+  return buttons
+    .map((button, index) => (button.pressed ? index : -1))
+    .filter((index) => index !== -1);
 }
 
 function rotateXRRigAroundHead(yawDelta) {
