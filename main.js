@@ -1650,3 +1650,4 @@ function resize() {
 function setStatus(message) {
   statusEl.textContent = message;
 }
+
