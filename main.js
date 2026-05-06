@@ -785,6 +785,7 @@ async function loadPmx(url, label, options = {}) {
     mesh.position.set(loadedModels.length * MODEL_X_OFFSET_METERS, 0, 0);
     mesh.rotation.set(0, 0, 0);
     applyObjectDefaultScale(mesh, "pmx");
+    improvePmxMorphCompatibility(mesh, label);
     preparePmxMaterials(mesh, label);
 
     const model = createModelRecord({
@@ -872,7 +873,9 @@ function loadMmdModelWithExtension(loaderToUse, url, extension, resourcePath) {
       url,
       (data) => {
         try {
-          resolve(builder.build(data, resourcePath ?? loaderToUse.resourcePath ?? "", undefined, reject));
+          const mesh = builder.build(data, resourcePath ?? loaderToUse.resourcePath ?? "", undefined, reject);
+          mesh.userData.pmxData = data;
+          resolve(mesh);
         } catch (error) {
           reject(error);
         }
@@ -881,6 +884,246 @@ function loadMmdModelWithExtension(loaderToUse, url, extension, resourcePath) {
       reject,
     );
   });
+}
+
+function improvePmxMorphCompatibility(mesh, label) {
+  const pmxData = mesh.userData.pmxData;
+  const geometry = mesh.geometry;
+  const basePosition = geometry?.attributes?.position;
+  const morphPositions = geometry?.morphAttributes?.position;
+
+  if (!pmxData?.morphs || !basePosition || !morphPositions || !mesh.morphTargetDictionary) {
+    console.warn(`[PMX morph] Could not inspect morph data for ${label}.`);
+    return;
+  }
+
+  const unsupportedMorphs = new Map();
+  const boneMorphs = new Map();
+  const rebuiltGroups = [];
+  const morphNames = new Set();
+
+  pmxData.morphs.forEach((morph, index) => {
+    morphNames.add(morph.name);
+
+    if (morph.type === 2) {
+      boneMorphs.set(morph.name, createPmxBoneMorphDefinition(mesh, pmxData, morph, index));
+      return;
+    }
+
+    if (!isSupportedPmxMorphType(morph.type)) {
+      unsupportedMorphs.set(morph.name, {
+        index,
+        type: morph.type,
+        reason: getPmxMorphTypeLabel(morph.type),
+      });
+    }
+  });
+
+  pmxData.morphs.forEach((morph, index) => {
+    if (morph.type !== 0) return;
+
+    const targetIndex = mesh.morphTargetDictionary[morph.name];
+    const targetAttribute = morphPositions[targetIndex];
+
+    if (targetIndex === undefined || !targetAttribute) {
+      console.warn(`[PMX morph] Group morph has no morph target: ${morph.name}`);
+      return;
+    }
+
+    const delta = new Float32Array(basePosition.array.length);
+    const unsupportedInGroup = new Set();
+    applyPmxMorphDelta(pmxData, index, 1, delta, [], unsupportedInGroup);
+
+    for (let i = 0; i < targetAttribute.array.length; i += 1) {
+      targetAttribute.array[i] = basePosition.array[i] + delta[i];
+    }
+
+    targetAttribute.needsUpdate = true;
+    rebuiltGroups.push({
+      name: morph.name,
+      elements: morph.elementCount,
+      unsupported: Array.from(unsupportedInGroup).join(", "),
+    });
+
+    const groupBoneDefinition = createPmxGroupBoneMorphDefinition(mesh, pmxData, morph, index);
+    if (groupBoneDefinition.elements.length > 0) {
+      boneMorphs.set(morph.name, groupBoneDefinition);
+    }
+  });
+
+  geometry.morphAttributes.position.forEach((attribute) => {
+    attribute.needsUpdate = true;
+  });
+
+  mesh.userData.pmxMorphInfo = {
+    morphNames,
+    unsupportedMorphs,
+    boneMorphs,
+  };
+
+  if (unsupportedMorphs.size > 0) {
+    console.warn(
+      `[PMX morph] Unsupported PMX morph types in ${label}. Bone/UV/material morphs are not implemented yet.`,
+      Array.from(unsupportedMorphs.entries()).map(([name, info]) => ({ name, ...info })),
+    );
+  }
+
+  const groupsWithUnsupportedChildren = rebuiltGroups.filter((group) => group.unsupported);
+  if (groupsWithUnsupportedChildren.length > 0) {
+    console.warn(
+      `[PMX morph] Some group morphs in ${label} contain unsupported child morphs.`,
+      groupsWithUnsupportedChildren,
+    );
+  }
+
+  console.group(`[PMX morph] Compatibility for ${label}`);
+  console.table(rebuiltGroups);
+  console.log("Bone morphs", Array.from(boneMorphs.keys()));
+  console.log("Morph targets", Object.keys(mesh.morphTargetDictionary));
+  console.groupEnd();
+}
+
+function createPmxBoneMorphDefinition(mesh, pmxData, morph, index) {
+  return {
+    index,
+    name: morph.name,
+    elements: createPmxBoneMorphElements(mesh, morph, 1),
+    raw: morph,
+    pmxData,
+  };
+}
+
+function createPmxGroupBoneMorphDefinition(mesh, pmxData, morph, index) {
+  const elements = [];
+  collectPmxGroupBoneMorphElements(mesh, pmxData, morph, 1, [], elements);
+
+  return {
+    index,
+    name: morph.name,
+    elements,
+    raw: morph,
+    pmxData,
+  };
+}
+
+function collectPmxGroupBoneMorphElements(mesh, pmxData, morph, weight, stack, elements) {
+  if (stack.includes(morph)) {
+    console.warn("[PMX bone morph] Recursive group bone morph skipped.", { morph: morph.name });
+    return;
+  }
+
+  for (const element of morph.elements ?? []) {
+    const childMorph = pmxData.morphs[element.index];
+    if (!childMorph) continue;
+
+    const childWeight = weight * (element.ratio ?? 1);
+
+    if (childMorph.type === 0) {
+      collectPmxGroupBoneMorphElements(mesh, pmxData, childMorph, childWeight, [...stack, morph], elements);
+    } else if (childMorph.type === 2) {
+      elements.push(...createPmxBoneMorphElements(mesh, childMorph, childWeight));
+    }
+  }
+}
+
+function createPmxBoneMorphElements(mesh, morph, ratio) {
+  const bones = mesh.skeleton?.bones ?? [];
+  const elements = [];
+
+  for (const element of morph.elements ?? []) {
+    const bone = bones[element.index];
+
+    if (!bone) {
+      console.warn("[PMX bone morph] Target bone not found.", {
+        morph: morph.name,
+        boneIndex: element.index,
+      });
+      continue;
+    }
+
+    const rotation = new THREE.Quaternion().identity().slerp(
+      new THREE.Quaternion().fromArray(element.rotation ?? [0, 0, 0, 1]),
+      ratio,
+    );
+
+    elements.push({
+      bone,
+      boneName: bone.name,
+      position: new THREE.Vector3().fromArray(element.position ?? [0, 0, 0]).multiplyScalar(ratio),
+      rotation,
+    });
+  }
+
+  return elements;
+}
+
+function applyPmxMorphDelta(pmxData, morphIndex, weight, delta, stack, unsupportedInGroup) {
+  if (stack.includes(morphIndex)) {
+    console.warn("[PMX morph] Recursive group morph skipped.", { stack, morphIndex });
+    return;
+  }
+
+  const morph = pmxData.morphs[morphIndex];
+  if (!morph) return;
+
+  if (morph.type === 0) {
+    for (const element of morph.elements ?? []) {
+      applyPmxMorphDelta(
+        pmxData,
+        element.index,
+        weight * (element.ratio ?? 1),
+        delta,
+        [...stack, morphIndex],
+        unsupportedInGroup,
+      );
+    }
+    return;
+  }
+
+  if (morph.type === 1) {
+    for (const element of morph.elements ?? []) {
+      const offset = element.index * 3;
+      delta[offset + 0] += element.position[0] * weight;
+      delta[offset + 1] += element.position[1] * weight;
+      delta[offset + 2] += element.position[2] * weight;
+    }
+    return;
+  }
+
+  if (morph.type === 2) {
+    return;
+  }
+
+  unsupportedInGroup.add(`${morph.name} (${getPmxMorphTypeLabel(morph.type)})`);
+}
+
+function isSupportedPmxMorphType(type) {
+  return type === 0 || type === 1 || type === 2;
+}
+
+function getPmxMorphTypeLabel(type) {
+  switch (type) {
+    case 0:
+      return "group";
+    case 1:
+      return "vertex";
+    case 2:
+      return "bone";
+    case 3:
+      return "uv";
+    case 4:
+      return "additional uv1";
+    case 5:
+      return "additional uv2";
+    case 6:
+      return "additional uv3";
+    case 7:
+      return "additional uv4";
+    case 8:
+      return "material";
+    default:
+      return `unknown:${type}`;
+  }
 }
 
 function preparePmxMaterials(object, label) {
@@ -1094,6 +1337,7 @@ function createModelRecord({ type, name, object, runtime, resourceUrls = [] }) {
     animationHelper: null,
     animationMixer: null,
     animationAction: null,
+    boneMorphState: null,
     resourceUrls,
     visible: true,
   };
@@ -1187,11 +1431,12 @@ async function loadVmd(url, label, targetModel) {
       throw new Error("VMD can only be applied to a PMX model.");
     }
 
-    const clip = await loadVmdAnimationClip(url, targetModel.object);
+    const { clip, boneMorphState } = await loadVmdAnimationClip(url, targetModel.object);
     const motion = createMotionRecord({
       type: "vmd",
       name: label,
       runtime: clip,
+      boneMorphState,
     });
 
     loadedMotions.push(motion);
@@ -1209,8 +1454,98 @@ async function loadVmd(url, label, targetModel) {
 
 function loadVmdAnimationClip(url, mesh) {
   return new Promise((resolve, reject) => {
-    mmdLoader.loadAnimation(url, mesh, resolve, undefined, reject);
+    mmdLoader.loadVMD(
+      url,
+      (vmd) => {
+        warnUnsupportedVmdMorphs(vmd, mesh);
+        resolve({
+          clip: mmdLoader.animationBuilder.build(vmd, mesh),
+          boneMorphState: createVmdBoneMorphState(vmd, mesh),
+        });
+      },
+      undefined,
+      reject,
+    );
   });
+}
+
+function createVmdBoneMorphState(vmd, mesh) {
+  const boneMorphs = mesh.userData.pmxMorphInfo?.boneMorphs;
+  if (!boneMorphs?.size) return null;
+
+  const curves = new Map();
+
+  for (const morph of vmd.morphs ?? []) {
+    const definition = boneMorphs.get(morph.morphName);
+    if (!definition) continue;
+
+    const curve = curves.get(morph.morphName) ?? {
+      name: morph.morphName,
+      definition,
+      keys: [],
+    };
+
+    curve.keys.push({
+      time: morph.frameNum / 30,
+      weight: morph.weight,
+    });
+
+    curves.set(morph.morphName, curve);
+  }
+
+  for (const curve of curves.values()) {
+    curve.keys.sort((a, b) => a.time - b.time);
+  }
+
+  if (curves.size > 0) {
+    console.group("[PMX bone morph] VMD bone morph curves");
+    console.table(
+      Array.from(curves.values()).map((curve) => ({
+        name: curve.name,
+        keys: curve.keys.length,
+        elements: curve.definition.elements.length,
+      })),
+    );
+    console.groupEnd();
+  }
+
+  return {
+    curves,
+    weights: new Map(),
+  };
+}
+
+function warnUnsupportedVmdMorphs(vmd, mesh) {
+  const morphTargetDictionary = mesh.morphTargetDictionary ?? {};
+  const pmxMorphInfo = mesh.userData.pmxMorphInfo;
+  const boneMorphs = pmxMorphInfo?.boneMorphs ?? new Map();
+  const unmatched = new Set();
+  const unsupported = new Set();
+
+  for (const morph of vmd.morphs ?? []) {
+    const morphName = morph.morphName;
+
+    if (morphTargetDictionary[morphName] === undefined && !boneMorphs.has(morphName)) {
+      unmatched.add(morphName);
+      continue;
+    }
+
+    const unsupportedInfo = pmxMorphInfo?.unsupportedMorphs?.get(morphName);
+    if (unsupportedInfo) {
+      unsupported.add(`${morphName} (${unsupportedInfo.reason})`);
+    }
+  }
+
+  if (unmatched.size > 0) {
+    console.warn("[VMD morph] VMD morphs not found on active PMX.", Array.from(unmatched));
+  }
+
+  if (unsupported.size > 0) {
+    console.warn(
+      "[VMD morph] VMD targets unsupported PMX morph types. These may not play correctly.",
+      Array.from(unsupported),
+    );
+  }
 }
 
 function createMotionRecord({ type, name, runtime }) {
@@ -1303,6 +1638,7 @@ function applyVmdToModel(model, motion) {
   model.animationMixer = model.animationHelper.objects.get(model.object)?.mixer ?? null;
   model.animationAction = model.animationMixer?.clipAction(motion.runtime) ?? null;
   model.animationAction?.setLoop(THREE.LoopRepeat);
+  model.boneMorphState = motion.boneMorphState;
 }
 
 function playAnimation() {
@@ -1328,6 +1664,7 @@ function stopAnimation() {
   }
 
   currentModel.animationAction.stop();
+  clearPmxBoneMorphs(currentModel);
   if (isVrmModel(currentModel)) {
     currentModel.vrm?.humanoid?.resetNormalizedPose?.();
     currentModel.vrm?.expressionManager?.resetValues?.();
@@ -1337,6 +1674,9 @@ function stopAnimation() {
 
 function clearModelAnimation(model) {
   if (!model) return;
+
+  clearPmxBoneMorphs(model);
+  model.boneMorphState = null;
 
   model.animationHelper?.remove?.(model.object);
   model.animationHelper = null;
@@ -1354,6 +1694,68 @@ function clearModelAnimation(model) {
 
   model.animationMixer = null;
   model.animationAction = null;
+}
+
+function updatePmxBoneMorphs(model) {
+  const state = model?.boneMorphState;
+  const actionTime = model?.animationAction?.time;
+
+  if (!state?.curves?.size || actionTime == null) return;
+
+  for (const curve of state.curves.values()) {
+    const weight = evaluateMorphCurve(curve.keys, actionTime);
+    if (weight === 0) continue;
+
+    applyPmxBoneMorphDefinition(curve.definition, weight);
+    state.weights.set(curve.definition, weight);
+  }
+}
+
+function clearPmxBoneMorphs(model) {
+  const state = model?.boneMorphState;
+  if (!state?.weights?.size) return;
+
+  for (const [definition, weight] of Array.from(state.weights.entries()).reverse()) {
+    applyPmxBoneMorphDefinition(definition, -weight);
+  }
+
+  state.weights.clear();
+}
+
+function applyPmxBoneMorphDefinition(definition, weight) {
+  for (const element of definition.elements) {
+    element.bone.position.addScaledVector(element.position, weight);
+
+    const rotationDelta = new THREE.Quaternion()
+      .identity()
+      .slerp(element.rotation, Math.abs(weight));
+
+    if (weight < 0) {
+      rotationDelta.invert();
+    }
+
+    element.bone.quaternion.multiply(rotationDelta).normalize();
+  }
+}
+
+function evaluateMorphCurve(keys, time) {
+  if (!keys?.length) return 0;
+  if (time <= keys[0].time) return keys[0].weight;
+
+  const lastKey = keys[keys.length - 1];
+  if (time >= lastKey.time) return lastKey.weight;
+
+  for (let i = 0; i < keys.length - 1; i += 1) {
+    const current = keys[i];
+    const next = keys[i + 1];
+    if (time < current.time || time > next.time) continue;
+
+    const span = next.time - current.time;
+    const t = span === 0 ? 0 : (time - current.time) / span;
+    return THREE.MathUtils.lerp(current.weight, next.weight, t);
+  }
+
+  return 0;
 }
 
 function revokeObjectUrls(urls = []) {
@@ -1631,7 +2033,9 @@ function render() {
 
   for (const model of loadedModels) {
     if (model.animationHelper) {
+      clearPmxBoneMorphs(model);
       model.animationHelper.update(delta);
+      updatePmxBoneMorphs(model);
     } else {
       model.animationMixer?.update(delta);
     }
