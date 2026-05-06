@@ -21,7 +21,8 @@ const VR_UI_TEXTURE_PIXELS_PER_METER = 1400;
 const VR_UI_TOGGLE_BUTTON_INDEX = 4;
 const MODEL_X_OFFSET_METERS = 1;
 const VR_UI_PANEL_WIDTH = 0.46;
-const PMX_MODEL_SCALE = 0.1;
+const VRM_MODEL_SCALE = 1.2;
+const PMX_MODEL_SCALE = 0.06;
 const PMX_TEXTURE_EXTENSIONS = new Set([
   "bmp",
   "gif",
@@ -563,7 +564,7 @@ function resetActiveModelPosition() {
   currentModel.object.position.set(0, 0, 0);
   currentModel.object.position.x = activeModelIndex * MODEL_X_OFFSET_METERS;
   currentModel.object.rotation.set(0, 0, 0);
-  currentModel.object.scale.setScalar(getModelDefaultScale(currentModel));
+  applyModelDefaultScale(currentModel);
 
   if (!renderer.xr.isPresenting) {
     frameModel(currentModel.object);
@@ -715,7 +716,7 @@ async function loadVrm(url, label) {
     vrm.scene.name = "LoadedVRM";
     vrm.scene.position.set(loadedModels.length * MODEL_X_OFFSET_METERS, 0, 0);
     vrm.scene.rotation.set(0, 0, 0);
-    vrm.scene.scale.setScalar(1);
+    applyObjectDefaultScale(vrm.scene, "vrm");
 
     setupLookAtProxy(vrm);
 
@@ -754,7 +755,7 @@ async function loadPmx(url, label, options = {}) {
     mesh.name = "LoadedPMX";
     mesh.position.set(loadedModels.length * MODEL_X_OFFSET_METERS, 0, 0);
     mesh.rotation.set(0, 0, 0);
-    mesh.scale.setScalar(PMX_MODEL_SCALE);
+    applyObjectDefaultScale(mesh, "pmx");
     preparePmxMaterials(mesh, label);
 
     const model = createModelRecord({
@@ -905,15 +906,31 @@ function configurePmxMaterial(material) {
 
   if (material.envMap) {
     setTextureColorSpace(material.envMap, THREE.SRGBColorSpace);
-    material.envMapIntensity = Math.min(material.envMapIntensity ?? 1, 0.35);
+    material.envMapIntensity = Math.min(material.envMapIntensity ?? 1, 0.2);
   }
 
   if (material.color) {
-    material.color.multiplyScalar(0.92);
+    material.color.multiplyScalar(0.82);
   }
 
   if (material.emissive) {
-    material.emissive.multiplyScalar(0.35);
+    material.emissive.multiplyScalar(0.18);
+  }
+
+  if (material.specular) {
+    material.specular.multiplyScalar(0.25);
+  }
+
+  if ("shininess" in material) {
+    material.shininess = Math.min(material.shininess ?? 30, 12);
+  }
+
+  if ("roughness" in material) {
+    material.roughness = Math.max(material.roughness ?? 0.5, 0.72);
+  }
+
+  if ("metalness" in material) {
+    material.metalness = Math.min(material.metalness ?? 0, 0.05);
   }
 
   material.toneMapped = true;
@@ -1051,8 +1068,24 @@ function createModelRecord({ type, name, object, runtime, resourceUrls = [] }) {
   };
 }
 
-function getModelDefaultScale(model) {
-  return isPmxModel(model) ? PMX_MODEL_SCALE : 1;
+function applyModelDefaultScale(model) {
+  if (!model?.object) return;
+
+  applyObjectDefaultScale(model.object, model.type);
+}
+
+function applyObjectDefaultScale(object, type) {
+  if (type === "pmx") {
+    object.scale.setScalar(PMX_MODEL_SCALE);
+    return;
+  }
+
+  if (type === "vrm") {
+    object.scale.set(VRM_MODEL_SCALE, VRM_MODEL_SCALE, -VRM_MODEL_SCALE);
+    return;
+  }
+
+  object.scale.setScalar(1);
 }
 
 function setActiveModel(index) {
