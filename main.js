@@ -1673,7 +1673,8 @@ function createVmdBoneMorphState(vmd, mesh) {
 
   return {
     curves,
-    weights: new Map(),
+    appliedWeights: new Map(),
+    baseTransforms: new Map(),
     duration: 0,
     lastDebugTime: 0,
   };
@@ -1819,6 +1820,7 @@ function applyVmdToModel(model, motion) {
 
 function playAnimation() {
   if (isPmxModel(currentModel) && currentModel?.animationHelper) {
+    resetPmxBoneMorphState(currentModel);
     if (currentModel.animationAction) {
       currentModel.animationAction.paused = false;
     }
@@ -1846,11 +1848,8 @@ function playAnimation() {
 
 function stopAnimation() {
   if (isPmxModel(currentModel) && currentModel?.animationHelper) {
-    currentModel.animationAction?.stop?.();
     currentModel.isPlaying = false;
-    clearPmxBoneMorphs(currentModel);
-    currentModel.object?.updateMatrixWorld(true);
-    currentModel.object?.skeleton?.update();
+    resetPmxVmdPlayback(currentModel);
     setStatus(`Animation stopped: ${currentModel.name}.`);
     return;
   }
@@ -1895,6 +1894,22 @@ function clearModelAnimation(model) {
   model.isPlaying = false;
 }
 
+function resetPmxVmdPlayback(model) {
+  if (!isPmxModel(model)) return;
+
+  model.animationAction?.stop?.();
+  model.animationAction?.reset?.();
+
+  if (model.animationMixer) {
+    model.animationMixer.setTime(0);
+  }
+
+  clearPmxBoneMorphs(model);
+  resetPmxBoneMorphState(model);
+  model.object?.updateMatrixWorld(true);
+  model.object?.skeleton?.update();
+}
+
 function updatePmxBoneMorphs(model) {
   const state = model?.boneMorphState;
   const helperState = model?.animationHelper?.objects?.get(model.object);
@@ -1905,6 +1920,9 @@ function updatePmxBoneMorphs(model) {
 
   if (!state?.curves?.size || actionTime == null) return;
 
+  capturePmxBoneMorphBaseTransforms(model, true);
+  restorePmxBoneMorphBaseTransforms(model);
+
   const morphTime = getLoopedMorphTime(actionTime, state.duration);
 
   for (const curve of state.curves.values()) {
@@ -1912,7 +1930,7 @@ function updatePmxBoneMorphs(model) {
     if (weight === 0) continue;
 
     applyPmxBoneMorphDefinition(curve.definition, weight);
-    state.weights.set(curve.definition, weight);
+    state.appliedWeights.set(curve.definition, weight);
   }
 
   model.object?.updateMatrixWorld(true);
@@ -1930,7 +1948,7 @@ function logPmxBoneMorphDebug(model, actionTime, morphTime) {
 
   const rows = Array.from(state.curves.values()).flatMap((curve) => {
     const weight = evaluateMorphCurve(curve.keys, morphTime);
-    const appliedWeight = state.weights.get(curve.definition) ?? 0;
+    const appliedWeight = state.appliedWeights.get(curve.definition) ?? 0;
 
     return curve.definition.elements.map((element) => ({
         morph: curve.definition.name,
@@ -1959,13 +1977,52 @@ function getLoopedMorphTime(time, duration) {
 
 function clearPmxBoneMorphs(model) {
   const state = model?.boneMorphState;
-  if (!state?.weights?.size) return;
+  if (!state) return;
 
-  for (const [definition, weight] of Array.from(state.weights.entries()).reverse()) {
-    applyPmxBoneMorphDefinition(definition, -weight);
+  restorePmxBoneMorphBaseTransforms(model);
+  state.appliedWeights?.clear();
+}
+
+function resetPmxBoneMorphState(model) {
+  const state = model?.boneMorphState;
+  if (!state) return;
+
+  state.appliedWeights?.clear();
+  state.baseTransforms?.clear();
+  state.lastDebugTime = 0;
+}
+
+function capturePmxBoneMorphBaseTransforms(model, force = false) {
+  const state = model?.boneMorphState;
+  if (!state?.curves?.size) return;
+
+  if (force) {
+    state.baseTransforms.clear();
+  } else if (state.baseTransforms.size > 0) {
+    return;
   }
 
-  state.weights.clear();
+  for (const curve of state.curves.values()) {
+    for (const element of curve.definition.elements) {
+      if (state.baseTransforms.has(element.bone)) continue;
+
+      state.baseTransforms.set(element.bone, {
+        position: element.bone.position.clone(),
+        quaternion: element.bone.quaternion.clone(),
+      });
+    }
+  }
+}
+
+function restorePmxBoneMorphBaseTransforms(model) {
+  const state = model?.boneMorphState;
+  if (!state?.baseTransforms?.size) return;
+
+  for (const [bone, transform] of state.baseTransforms.entries()) {
+    bone.position.copy(transform.position);
+    bone.quaternion.copy(transform.quaternion);
+    bone.updateMatrix();
+  }
 }
 
 function applyPmxBoneMorphDefinition(definition, weight) {
