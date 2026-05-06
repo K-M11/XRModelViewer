@@ -1,6 +1,7 @@
 import * as THREE from "three";
 import JSZip from "jszip";
 import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
+import { MMDAnimationHelper } from "three-stdlib/animation/MMDAnimationHelper.js";
 import { MMDLoader } from "three-stdlib/loaders/MMDLoader.js";
 import { PointerLockControls } from "three/addons/controls/PointerLockControls.js";
 import { VRButton } from "three/addons/webxr/VRButton.js";
@@ -21,8 +22,8 @@ const VR_UI_TEXTURE_PIXELS_PER_METER = 1400;
 const VR_UI_TOGGLE_BUTTON_INDEX = 4;
 const MODEL_X_OFFSET_METERS = 1;
 const VR_UI_PANEL_WIDTH = 0.46;
-const VRM_MODEL_SCALE = 1.2;
-const PMX_MODEL_SCALE = 0.06;
+const VRM_MODEL_SCALE = 1.25;
+const PMX_MODEL_SCALE = 0.08;
 const PMX_TEXTURE_EXTENSIONS = new Set([
   "bmp",
   "gif",
@@ -36,6 +37,7 @@ const PMX_TEXTURE_EXTENSIONS = new Set([
 const statusEl = document.querySelector("#status");
 const fileInput = document.querySelector("#fileInput");
 const vrmaInput = document.querySelector("#vrmaInput");
+const vmdInput = document.querySelector("#vmdInput");
 const urlInput = document.querySelector("#urlInput");
 const loadUrlButton = document.querySelector("#loadUrlButton");
 const lockPointerButton = document.querySelector("#lockPointerButton");
@@ -81,6 +83,7 @@ let currentVrm = null;
 let currentModel = null;
 let currentObjectUrl = null;
 let currentVrmaObjectUrl = null;
+let currentVmdObjectUrl = null;
 let activeModelIndex = -1;
 let activeMotionIndex = -1;
 let lastXRAxesLogTime = 0;
@@ -357,6 +360,13 @@ function setupEvents() {
     loadMotionFile(file);
   });
 
+  vmdInput.addEventListener("change", () => {
+    const file = vmdInput.files?.[0];
+    if (!file) return;
+
+    loadVmdFile(file);
+  });
+
   loadUrlButton.addEventListener("click", () => {
     const url = urlInput.value.trim();
     if (!url) {
@@ -438,6 +448,25 @@ function loadMotionFile(file) {
 
   currentVrmaObjectUrl = URL.createObjectURL(file);
   loadVrma(currentVrmaObjectUrl, file.name);
+}
+
+function loadVmdFile(file) {
+  if (!isPmxModel(currentModel)) {
+    setStatus("Select a PMX model before loading a VMD motion.");
+    console.warn("[VMD] VMD can only be applied to the active PMX model.", {
+      activeModel: currentModel?.name ?? null,
+      activeType: currentModel?.type ?? null,
+      file: file.name,
+    });
+    return;
+  }
+
+  if (currentVmdObjectUrl) {
+    URL.revokeObjectURL(currentVmdObjectUrl);
+  }
+
+  currentVmdObjectUrl = URL.createObjectURL(file);
+  loadVmd(currentVmdObjectUrl, file.name, currentModel);
 }
 
 function renderAssetLists() {
@@ -771,7 +800,7 @@ async function loadPmx(url, label, options = {}) {
     setActiveModel(loadedModels.length - 1);
     renderAssetLists();
 
-    setStatus(`Loaded PMX ${label}. VMD playback is not enabled yet.`);
+    setStatus(`Loaded PMX ${label}. Load a VMD motion to animate it.`);
   } catch (error) {
     console.error(error);
     revokeObjectUrls(options.resourceUrls);
@@ -1061,6 +1090,8 @@ function createModelRecord({ type, name, object, runtime, resourceUrls = [] }) {
     vrm: type === "vrm" ? runtime : null,
     pmx: type === "pmx" ? runtime : null,
     currentMotion: null,
+    motionType: null,
+    animationHelper: null,
     animationMixer: null,
     animationAction: null,
     resourceUrls,
@@ -1132,7 +1163,7 @@ async function loadVrma(url, label) {
     renderAssetLists();
 
     if (isPmxModel(currentModel)) {
-      setStatus(`Loaded motion ${label}. PMX VMD playback is not enabled yet.`);
+      setStatus(`Loaded VRMA ${label}. Select a VRM model to apply it.`);
       return;
     }
 
@@ -1146,6 +1177,40 @@ async function loadVrma(url, label) {
     console.error(error);
     setStatus(`Could not load VRMA: ${error.message}`);
   }
+}
+
+async function loadVmd(url, label, targetModel) {
+  setStatus(`Loading VMD ${label}...`);
+
+  try {
+    if (!isPmxModel(targetModel)) {
+      throw new Error("VMD can only be applied to a PMX model.");
+    }
+
+    const clip = await loadVmdAnimationClip(url, targetModel.object);
+    const motion = createMotionRecord({
+      type: "vmd",
+      name: label,
+      runtime: clip,
+    });
+
+    loadedMotions.push(motion);
+    activeMotionIndex = loadedMotions.length - 1;
+    applyMotionToModel(targetModel, motion);
+    renderAssetLists();
+    playAnimation();
+
+    setStatus(`Applied VMD ${label} to ${targetModel.name}.`);
+  } catch (error) {
+    console.error(error);
+    setStatus(`Could not load VMD: ${error.message}`);
+  }
+}
+
+function loadVmdAnimationClip(url, mesh) {
+  return new Promise((resolve, reject) => {
+    mmdLoader.loadAnimation(url, mesh, resolve, undefined, reject);
+  });
 }
 
 function createMotionRecord({ type, name, runtime }) {
@@ -1163,17 +1228,29 @@ function setActiveMotion(index) {
   activeMotionIndex = index;
   const motion = loadedMotions[activeMotionIndex];
 
-  if (isVrmModel(currentModel)) {
-    currentModel.currentMotion = motion;
-    applyMotionToModel(currentModel, motion);
+  if (!currentModel) {
+    renderAssetLists();
+    setStatus(`Active motion: ${motion.name}`);
+    return;
   }
 
+  if (isVrmModel(currentModel) && motion.type !== "vrma") {
+    renderAssetLists();
+    setStatus("VMD motions can only be applied to PMX models.");
+    return;
+  }
+
+  if (isPmxModel(currentModel) && motion.type !== "vmd") {
+    renderAssetLists();
+    setStatus("VRMA motions can only be applied to VRM models.");
+    return;
+  }
+
+  applyMotionToModel(currentModel, motion);
   renderAssetLists();
 
   if (currentModel?.animationAction) {
     playAnimation();
-  } else if (isPmxModel(currentModel)) {
-    setStatus(`Active motion: ${motion.name}. PMX VMD playback is not enabled yet.`);
   } else {
     setStatus(`Active motion: ${motion.name}`);
   }
@@ -1182,9 +1259,24 @@ function setActiveMotion(index) {
 function applyMotionToModel(model, motion) {
   clearModelAnimation(model);
 
+  if (!model || !motion) return;
+
+  if (model.type === "vrm" && motion.type === "vrma") {
+    applyVrmaToModel(model, motion);
+    return;
+  }
+
+  if (model.type === "pmx" && motion.type === "vmd") {
+    applyVmdToModel(model, motion);
+    return;
+  }
+}
+
+function applyVrmaToModel(model, motion) {
   if (!model?.vrm || !motion) return;
 
   model.currentMotion = motion;
+  model.motionType = "vrma";
   model.vrm.humanoid?.resetNormalizedPose?.();
   model.vrm.lookAt?.reset?.();
   if (model.vrm.lookAt) {
@@ -1198,10 +1290,25 @@ function applyMotionToModel(model, motion) {
   model.animationAction.clampWhenFinished = false;
 }
 
+function applyVmdToModel(model, motion) {
+  if (!model?.pmx || !motion?.runtime) return;
+
+  model.currentMotion = motion;
+  model.motionType = "vmd";
+  model.animationHelper = new MMDAnimationHelper({ afterglow: 0 });
+  model.animationHelper.add(model.object, {
+    animation: motion.runtime,
+    physics: false,
+  });
+  model.animationMixer = model.animationHelper.objects.get(model.object)?.mixer ?? null;
+  model.animationAction = model.animationMixer?.clipAction(motion.runtime) ?? null;
+  model.animationAction?.setLoop(THREE.LoopRepeat);
+}
+
 function playAnimation() {
   if (!currentModel?.animationAction) {
     if (isPmxModel(currentModel)) {
-      setStatus("PMX VMD playback is not enabled yet.");
+      setStatus("Select a PMX model and apply a VMD motion first.");
       return;
     }
 
@@ -1211,7 +1318,7 @@ function playAnimation() {
 
   currentModel.animationAction.paused = false;
   currentModel.animationAction.play();
-  setStatus(`Animation playing: ${currentModel.name}.`);
+  setStatus(`${currentModel.motionType?.toUpperCase() ?? "Animation"} playing: ${currentModel.name}.`);
 }
 
 function stopAnimation() {
@@ -1221,13 +1328,23 @@ function stopAnimation() {
   }
 
   currentModel.animationAction.stop();
-  currentModel.vrm?.humanoid?.resetNormalizedPose?.();
-  currentModel.vrm?.expressionManager?.resetValues?.();
+  if (isVrmModel(currentModel)) {
+    currentModel.vrm?.humanoid?.resetNormalizedPose?.();
+    currentModel.vrm?.expressionManager?.resetValues?.();
+  }
   setStatus(`Animation stopped: ${currentModel.name}.`);
 }
 
 function clearModelAnimation(model) {
-  if (!model?.animationMixer) return;
+  if (!model) return;
+
+  model.animationHelper?.remove?.(model.object);
+  model.animationHelper = null;
+
+  if (!model.animationMixer) {
+    model.animationAction = null;
+    return;
+  }
 
   model.animationMixer.stopAllAction();
 
@@ -1513,7 +1630,11 @@ function render() {
   updateModelDrag();
 
   for (const model of loadedModels) {
-    model.animationMixer?.update(delta);
+    if (model.animationHelper) {
+      model.animationHelper.update(delta);
+    } else {
+      model.animationMixer?.update(delta);
+    }
     model.vrm?.update(delta);
   }
 
