@@ -24,6 +24,10 @@ const MODEL_X_OFFSET_METERS = 1;
 const VR_UI_PANEL_WIDTH = 0.46;
 const VRM_MODEL_SCALE = 1.25;
 const PMX_MODEL_SCALE = 0.08;
+const PMX_BONE_MORPH_ROTATION_ORDER = "world";
+const PMX_BONE_MORPH_FLIP_Z_POSITION = true;
+const PMX_BONE_MORPH_FLIP_XY_ROTATION = true;
+let lastPmxVmdRenderDebugTime = 0;
 const PMX_TEXTURE_EXTENSIONS = new Set([
   "bmp",
   "gif",
@@ -979,14 +983,37 @@ function improvePmxMorphCompatibility(mesh, label) {
   console.group(`[PMX morph] Compatibility for ${label}`);
   console.table(rebuiltGroups);
   console.log("Bone morphs", Array.from(boneMorphs.keys()));
+  console.table(createPmxBoneMorphDebugRows(boneMorphs));
   console.log("Morph targets", Object.keys(mesh.morphTargetDictionary));
   console.groupEnd();
+}
+
+function createPmxBoneMorphDebugRows(boneMorphs) {
+  return Array.from(boneMorphs.values()).flatMap((definition) =>
+    definition.elements.map((element) => ({
+      morph: definition.name,
+      sourceType: definition.sourceType,
+      bone: element.boneName,
+      position: vectorToDebugString(element.position),
+      rotation: quaternionToDebugString(element.rotation),
+      rotationAngle: (2 * Math.acos(THREE.MathUtils.clamp(element.rotation.w, -1, 1))).toFixed(4),
+    })),
+  );
+}
+
+function vectorToDebugString(vector) {
+  return `${vector.x.toFixed(4)}, ${vector.y.toFixed(4)}, ${vector.z.toFixed(4)}`;
+}
+
+function quaternionToDebugString(quaternion) {
+  return `${quaternion.x.toFixed(4)}, ${quaternion.y.toFixed(4)}, ${quaternion.z.toFixed(4)}, ${quaternion.w.toFixed(4)}`;
 }
 
 function createPmxBoneMorphDefinition(mesh, pmxData, morph, index) {
   return {
     index,
     name: morph.name,
+    sourceType: "bone",
     elements: createPmxBoneMorphElements(mesh, morph, 1),
     raw: morph,
     pmxData,
@@ -1000,6 +1027,7 @@ function createPmxGroupBoneMorphDefinition(mesh, pmxData, morph, index) {
   return {
     index,
     name: morph.name,
+    sourceType: "group",
     elements,
     raw: morph,
     pmxData,
@@ -1031,30 +1059,129 @@ function createPmxBoneMorphElements(mesh, morph, ratio) {
   const elements = [];
 
   for (const element of morph.elements ?? []) {
-    const bone = bones[element.index];
+    const boneIndex = element.index ?? element.boneIndex;
+    const bone = bones[boneIndex];
 
     if (!bone) {
       console.warn("[PMX bone morph] Target bone not found.", {
         morph: morph.name,
-        boneIndex: element.index,
+        boneIndex,
+        element,
       });
       continue;
     }
 
-    const rotation = new THREE.Quaternion().identity().slerp(
-      new THREE.Quaternion().fromArray(element.rotation ?? [0, 0, 0, 1]),
-      ratio,
-    );
+    const position = normalizePmxVector3(readPmxBoneMorphPosition(element));
+    const rotation = normalizePmxQuaternion(readPmxBoneMorphRotation(element));
+
+    if (!position && !rotation) {
+      console.warn("[PMX bone morph] Element has no recognized position/rotation fields.", {
+        morph: morph.name,
+        boneIndex,
+        boneName: bone.name,
+        element,
+      });
+      continue;
+    }
+
+    const weightedRotation = new THREE.Quaternion().identity().slerp(rotation ?? new THREE.Quaternion(), ratio);
 
     elements.push({
       bone,
       boneName: bone.name,
-      position: new THREE.Vector3().fromArray(element.position ?? [0, 0, 0]).multiplyScalar(ratio),
-      rotation,
+      position: normalizePmxBoneMorphPosition(position ?? new THREE.Vector3()).multiplyScalar(ratio),
+      rotation: weightedRotation,
+      source: element,
     });
   }
 
   return elements;
+}
+
+function normalizePmxBoneMorphPosition(position) {
+  const normalized = position.clone();
+
+  if (PMX_BONE_MORPH_FLIP_Z_POSITION) {
+    normalized.z *= -1;
+  }
+
+  return normalized;
+}
+
+function readPmxBoneMorphPosition(element) {
+  return (
+    element.position ??
+    element.translation ??
+    element.location ??
+    element.move ??
+    element.offset ??
+    null
+  );
+}
+
+function readPmxBoneMorphRotation(element) {
+  return (
+    element.rotation ??
+    element.quaternion ??
+    element.orientation ??
+    element.rotate ??
+    null
+  );
+}
+
+function normalizePmxVector3(value) {
+  if (!value) return null;
+
+  if (Array.isArray(value) || ArrayBuffer.isView(value)) {
+    return new THREE.Vector3(value[0] ?? 0, value[1] ?? 0, value[2] ?? 0);
+  }
+
+  if (typeof value === "object") {
+    return new THREE.Vector3(value.x ?? 0, value.y ?? 0, value.z ?? 0);
+  }
+
+  return null;
+}
+
+function normalizePmxQuaternion(value) {
+  let quaternion = null;
+
+  if (!value) return null;
+
+  if (Array.isArray(value) || ArrayBuffer.isView(value)) {
+    if (value.length >= 4) {
+      quaternion = new THREE.Quaternion(value[0] ?? 0, value[1] ?? 0, value[2] ?? 0, value[3] ?? 1).normalize();
+      return normalizePmxBoneMorphRotation(quaternion);
+    }
+
+    if (value.length >= 3) {
+      quaternion = new THREE.Quaternion().setFromEuler(new THREE.Euler(value[0] ?? 0, value[1] ?? 0, value[2] ?? 0));
+      return normalizePmxBoneMorphRotation(quaternion);
+    }
+  }
+
+  if (typeof value === "object") {
+    if ("w" in value) {
+      quaternion = new THREE.Quaternion(value.x ?? 0, value.y ?? 0, value.z ?? 0, value.w ?? 1).normalize();
+      return normalizePmxBoneMorphRotation(quaternion);
+    }
+
+    quaternion = new THREE.Quaternion().setFromEuler(new THREE.Euler(value.x ?? 0, value.y ?? 0, value.z ?? 0));
+    return normalizePmxBoneMorphRotation(quaternion);
+  }
+
+  return null;
+}
+
+function normalizePmxBoneMorphRotation(quaternion) {
+  const normalized = quaternion.clone();
+
+  if (PMX_BONE_MORPH_FLIP_XY_ROTATION) {
+    normalized.x *= -1;
+    normalized.y *= -1;
+  }
+
+  return normalized.normalize();
 }
 
 function applyPmxMorphDelta(pmxData, morphIndex, weight, delta, stack, unsupportedInGroup) {
@@ -1338,6 +1465,7 @@ function createModelRecord({ type, name, object, runtime, resourceUrls = [] }) {
     animationMixer: null,
     animationAction: null,
     boneMorphState: null,
+    isPlaying: false,
     resourceUrls,
     visible: true,
   };
@@ -1458,15 +1586,42 @@ function loadVmdAnimationClip(url, mesh) {
       url,
       (vmd) => {
         warnUnsupportedVmdMorphs(vmd, mesh);
+        const boneMorphState = createVmdBoneMorphState(vmd, mesh);
+        const vmdForClip = removeBoneMorphsFromVmd(vmd, boneMorphState);
+        const clip = mmdLoader.animationBuilder.build(vmdForClip, mesh);
+        if (boneMorphState) {
+          boneMorphState.duration = clip.duration;
+        }
         resolve({
-          clip: mmdLoader.animationBuilder.build(vmd, mesh),
-          boneMorphState: createVmdBoneMorphState(vmd, mesh),
+          clip,
+          boneMorphState,
         });
       },
       undefined,
       reject,
     );
   });
+}
+
+function removeBoneMorphsFromVmd(vmd, boneMorphState) {
+  if (!boneMorphState?.curves?.size) return vmd;
+
+  const directBoneMorphNames = new Set(
+    Array.from(boneMorphState.curves.values())
+      .filter((curve) => curve.definition.sourceType === "bone")
+      .map((curve) => curve.name),
+  );
+
+  if (directBoneMorphNames.size === 0) return vmd;
+
+  return {
+    ...vmd,
+    metadata: {
+      ...vmd.metadata,
+      morphCount: (vmd.morphs ?? []).filter((morph) => !directBoneMorphNames.has(morph.morphName)).length,
+    },
+    morphs: (vmd.morphs ?? []).filter((morph) => !directBoneMorphNames.has(morph.morphName)),
+  };
 }
 
 function createVmdBoneMorphState(vmd, mesh) {
@@ -1482,6 +1637,7 @@ function createVmdBoneMorphState(vmd, mesh) {
     const curve = curves.get(morph.morphName) ?? {
       name: morph.morphName,
       definition,
+      sourceType: definition.sourceType,
       keys: [],
     };
 
@@ -1502,16 +1658,24 @@ function createVmdBoneMorphState(vmd, mesh) {
     console.table(
       Array.from(curves.values()).map((curve) => ({
         name: curve.name,
+        sourceType: curve.sourceType,
         keys: curve.keys.length,
         elements: curve.definition.elements.length,
       })),
     );
     console.groupEnd();
+  } else {
+    console.warn("[PMX bone morph] No VMD curves matched PMX bone morph names.", {
+      pmxBoneMorphs: Array.from(boneMorphs.keys()),
+      vmdMorphs: Array.from(new Set((vmd.morphs ?? []).map((morph) => morph.morphName))),
+    });
   }
 
   return {
     curves,
     weights: new Map(),
+    duration: 0,
+    lastDebugTime: 0,
   };
 }
 
@@ -1548,12 +1712,13 @@ function warnUnsupportedVmdMorphs(vmd, mesh) {
   }
 }
 
-function createMotionRecord({ type, name, runtime }) {
+function createMotionRecord({ type, name, runtime, ...extras }) {
   return {
     id: globalThis.crypto?.randomUUID?.() ?? `${type}-${Date.now()}-${loadedMotions.length}`,
     type,
     name,
     runtime,
+    ...extras,
   };
 }
 
@@ -1584,7 +1749,7 @@ function setActiveMotion(index) {
   applyMotionToModel(currentModel, motion);
   renderAssetLists();
 
-  if (currentModel?.animationAction) {
+  if (currentModel?.animationAction || currentModel?.animationHelper) {
     playAnimation();
   } else {
     setStatus(`Active motion: ${motion.name}`);
@@ -1635,13 +1800,34 @@ function applyVmdToModel(model, motion) {
     animation: motion.runtime,
     physics: false,
   });
-  model.animationMixer = model.animationHelper.objects.get(model.object)?.mixer ?? null;
-  model.animationAction = model.animationMixer?.clipAction(motion.runtime) ?? null;
-  model.animationAction?.setLoop(THREE.LoopRepeat);
+  const helperState = model.animationHelper.objects.get(model.object);
+  model.animationMixer = helperState?.mixer ?? null;
+  model.animationAction = model.animationMixer?._actions?.[0] ?? null;
+  model.animationAction?.setLoop?.(THREE.LoopRepeat);
   model.boneMorphState = motion.boneMorphState;
+
+  console.log("[PMX VMD] Applied VMD state", {
+    model: model.name,
+    hasHelper: Boolean(model.animationHelper),
+    hasMixer: Boolean(model.animationMixer),
+    hasAction: Boolean(model.animationAction),
+    helperMeshes: model.animationHelper.meshes?.length ?? 0,
+    hasBoneMorphState: Boolean(model.boneMorphState),
+    boneMorphCurves: model.boneMorphState?.curves?.size ?? 0,
+  });
 }
 
 function playAnimation() {
+  if (isPmxModel(currentModel) && currentModel?.animationHelper) {
+    if (currentModel.animationAction) {
+      currentModel.animationAction.paused = false;
+    }
+    currentModel.animationAction?.play?.();
+    currentModel.isPlaying = true;
+    setStatus(`${currentModel.motionType?.toUpperCase() ?? "Animation"} playing: ${currentModel.name}.`);
+    return;
+  }
+
   if (!currentModel?.animationAction) {
     if (isPmxModel(currentModel)) {
       setStatus("Select a PMX model and apply a VMD motion first.");
@@ -1654,16 +1840,28 @@ function playAnimation() {
 
   currentModel.animationAction.paused = false;
   currentModel.animationAction.play();
+  currentModel.isPlaying = true;
   setStatus(`${currentModel.motionType?.toUpperCase() ?? "Animation"} playing: ${currentModel.name}.`);
 }
 
 function stopAnimation() {
+  if (isPmxModel(currentModel) && currentModel?.animationHelper) {
+    currentModel.animationAction?.stop?.();
+    currentModel.isPlaying = false;
+    clearPmxBoneMorphs(currentModel);
+    currentModel.object?.updateMatrixWorld(true);
+    currentModel.object?.skeleton?.update();
+    setStatus(`Animation stopped: ${currentModel.name}.`);
+    return;
+  }
+
   if (!currentModel?.animationAction) {
     setStatus("No animation is loaded for the active model.");
     return;
   }
 
   currentModel.animationAction.stop();
+  currentModel.isPlaying = false;
   clearPmxBoneMorphs(currentModel);
   if (isVrmModel(currentModel)) {
     currentModel.vrm?.humanoid?.resetNormalizedPose?.();
@@ -1694,21 +1892,69 @@ function clearModelAnimation(model) {
 
   model.animationMixer = null;
   model.animationAction = null;
+  model.isPlaying = false;
 }
 
 function updatePmxBoneMorphs(model) {
   const state = model?.boneMorphState;
-  const actionTime = model?.animationAction?.time;
+  const helperState = model?.animationHelper?.objects?.get(model.object);
+  const actionTime =
+    helperState?.mixer?.time ??
+    model?.animationAction?.time ??
+    null;
 
   if (!state?.curves?.size || actionTime == null) return;
 
+  const morphTime = getLoopedMorphTime(actionTime, state.duration);
+
   for (const curve of state.curves.values()) {
-    const weight = evaluateMorphCurve(curve.keys, actionTime);
+    const weight = evaluateMorphCurve(curve.keys, morphTime);
     if (weight === 0) continue;
 
     applyPmxBoneMorphDefinition(curve.definition, weight);
     state.weights.set(curve.definition, weight);
   }
+
+  model.object?.updateMatrixWorld(true);
+  model.object?.skeleton?.update();
+  logPmxBoneMorphDebug(model, actionTime, morphTime);
+}
+
+function logPmxBoneMorphDebug(model, actionTime, morphTime) {
+  const state = model?.boneMorphState;
+  const now = performance.now();
+
+  if (!state?.curves?.size || now - state.lastDebugTime < 1000) return;
+
+  state.lastDebugTime = now;
+
+  const rows = Array.from(state.curves.values()).flatMap((curve) => {
+    const weight = evaluateMorphCurve(curve.keys, morphTime);
+    const appliedWeight = state.weights.get(curve.definition) ?? 0;
+
+    return curve.definition.elements.map((element) => ({
+        morph: curve.definition.name,
+        sourceType: curve.definition.sourceType,
+        time: actionTime.toFixed(3),
+        morphTime: morphTime.toFixed(3),
+        weight: weight.toFixed(3),
+        appliedWeight: appliedWeight.toFixed(3),
+        bone: element.boneName,
+        position: vectorToDebugString(element.position),
+        rotationAngle: (2 * Math.acos(THREE.MathUtils.clamp(element.rotation.w, -1, 1))).toFixed(4),
+        boneQuaternion: quaternionToDebugString(element.bone.quaternion),
+      }));
+  });
+
+  console.group("[PMX bone morph] Runtime debug");
+  console.table(rows);
+  console.groupEnd();
+}
+
+function getLoopedMorphTime(time, duration) {
+  if (!duration || !Number.isFinite(duration) || duration <= 0) return time;
+
+  return time % duration;
 }
 
 function clearPmxBoneMorphs(model) {
@@ -1734,7 +1980,13 @@ function applyPmxBoneMorphDefinition(definition, weight) {
       rotationDelta.invert();
     }
 
-    element.bone.quaternion.multiply(rotationDelta).normalize();
+    if (PMX_BONE_MORPH_ROTATION_ORDER === "world") {
+      element.bone.quaternion.premultiply(rotationDelta).normalize();
+    } else {
+      element.bone.quaternion.multiply(rotationDelta).normalize();
+    }
+
+    element.bone.updateMatrix();
   }
 }
 
@@ -2033,9 +2285,12 @@ function render() {
 
   for (const model of loadedModels) {
     if (model.animationHelper) {
-      clearPmxBoneMorphs(model);
-      model.animationHelper.update(delta);
-      updatePmxBoneMorphs(model);
+      logPmxVmdRenderState(model);
+      if (model.isPlaying) {
+        clearPmxBoneMorphs(model);
+        model.animationHelper.update(delta);
+        updatePmxBoneMorphs(model);
+      }
     } else {
       model.animationMixer?.update(delta);
     }
@@ -2043,6 +2298,24 @@ function render() {
   }
 
   renderer.render(scene, camera);
+}
+
+function logPmxVmdRenderState(model) {
+  const now = performance.now();
+  if (now - lastPmxVmdRenderDebugTime < 1000) return;
+
+  lastPmxVmdRenderDebugTime = now;
+
+  console.log("[PMX VMD] render state", {
+    model: model.name,
+    hasHelper: Boolean(model.animationHelper),
+    hasMixer: Boolean(model.animationMixer),
+    hasAction: Boolean(model.animationAction),
+    actionTime: model.animationAction?.time ?? null,
+    mixerTime: model.animationMixer?.time ?? null,
+    hasBoneMorphState: Boolean(model.boneMorphState),
+    boneMorphCurves: model.boneMorphState?.curves?.size ?? 0,
+  });
 }
 
 function resize() {
